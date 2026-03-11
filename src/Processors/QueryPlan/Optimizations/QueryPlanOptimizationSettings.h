@@ -193,6 +193,8 @@ struct QueryPlanOptimizationSettings
     bool query_plan_optimize_primary_key = true;
 
     bool keep_logical_steps;
+    /// If non-negative, apply only optimizations up to the specified pass for EXPLAIN PLAN
+    int optimize_run_passes = -1;
 
     bool is_explain;
 
