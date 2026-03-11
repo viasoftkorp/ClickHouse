@@ -1278,13 +1278,29 @@ static QueryPlanNode buildPhysicalJoinImpl(
         can_remove_residual_filter = true;
         required_output_nodes.emplace_back(residual_filter_condition.getNode());
     }
+    LOG_DEBUG(&Poco::Logger::get("XXXX"), "{}:{}: required_output_nodes [{}]", __FILE__, __LINE__, fmt::join(required_output_nodes | std::views::transform([](const auto * node) { return node->result_name; }), ", "));
 
     ActionsDAG residual_dag = ActionsDAG::foldActionsByProjection(actions_after_join_fold, required_output_nodes);
+    LOG_DEBUG(&Poco::Logger::get("XXXX"), "{}:{}: residual_dag\n{}", __FILE__, __LINE__, residual_dag.dumpDAG());
 
     table_join->setInputColumns(
         left_dag.getNamesAndTypesList(),
         right_dag.getNamesAndTypesList());
-    table_join->setUsedColumns(residual_dag.getRequiredColumnsNames());
+    {
+        auto used_columns = residual_dag.getRequiredColumnsNames();
+        if (used_columns.empty())
+        {
+            /// Ensure the join produces at least one output column so that result blocks
+            /// have the correct row count. When all post-join outputs are constants
+            /// (e.g. `__join_result_dummy`), residual_dag has no required inputs,
+            /// and the join would produce blocks with 0 columns
+            if (!left_dag.getOutputs().empty())
+                used_columns.push_back(left_dag.getOutputs().front()->result_name);
+            else if (!right_dag.getOutputs().empty())
+                used_columns.push_back(right_dag.getOutputs().front()->result_name);
+        }
+        table_join->setUsedColumns(used_columns);
+    }
     table_join->setJoinOperator(join_operator);
 
     SharedHeader left_sample_block = blockWithActionsDAGOutput(left_dag);

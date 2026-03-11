@@ -1221,11 +1221,17 @@ QueryPlan::Node chooseJoinOrder(QueryGraphBuilder query_graph_builder, QueryPlan
                 }
             }
 
-            if (dag_outputs.empty())
+            if (actions_after_join.empty())
             {
                 if (!first_dropped_node)
                     throw Exception(ErrorCodes::LOGICAL_ERROR, "No columns returned from join: {}", current_dag->dumpDAG());
                 actions_after_join.push_back(first_dropped_node);
+            }
+
+            if (dag_outputs.empty())
+            {
+                if (!first_dropped_node)
+                    throw Exception(ErrorCodes::LOGICAL_ERROR, "No columns returned from join: {}", current_dag->dumpDAG());
                 dag_outputs.push_back(first_dropped_node);
                 current_input_nodes.at(first_dropped_node_pos).second = first_dropped_node;
             }
