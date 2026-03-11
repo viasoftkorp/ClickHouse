@@ -631,9 +631,19 @@ size_t addChildQueryGraph(QueryGraphBuilder & graph, QueryPlan::Node * node, Que
 {
     auto * join_node = node;
     auto * expression_step = typeid_cast<ExpressionStep *>(node->step.get());
-    if (expression_step && node->children.size() == 1 && !expression_step->getExpression().hasArrayJoin())
+    if (expression_step && node->children.size() == 1  && !expression_step->getExpression().hasArrayJoin())
     {
-        join_node = node->children[0];
+        if (isPassthroughActions(expression_step->getExpression()))
+        {
+            /// Just skip trivial expression step, it doesn't change any columns
+            expression_step = nullptr;
+            join_node = node->children[0];
+            node = node->children[0];
+        }
+        else if (graph.context->optimization_settings.merge_expression_into_join)
+        {
+            join_node = node->children[0];
+        }
     }
 
     {
