@@ -9,6 +9,7 @@ SET query_plan_optimize_join_order_limit = 64;
 
 CREATE TABLE t0 (id UInt64, val String) ENGINE = MergeTree ORDER BY id;
 INSERT INTO t0 VALUES (0, 'aa'), (1, 'bb'), (2, 'cc');
+
 CREATE TABLE t1 (id UInt64, val String) ENGINE = MergeTree ORDER BY id;
 INSERT INTO t1 VALUES (1, 'ODD'), (2, 'EVEN'), (3, 'ODD');
 
@@ -22,29 +23,30 @@ SET enable_join_runtime_filters = 0;
 
 EXPLAIN PLAN keep_logical_steps = 1, description = 0
 SELECT * FROM (
-    SELECT t0.id, upper(t0.val) as key, lower(t1.val) as attr
+    SELECT t0.id, upper(t0.val) as key, t0.val || lower(t1.val) as attr
     FROM (SELECT id + 1 as id, val FROM t0) as t0
     JOIN ( SELECT id, val FROM t1 ) as t1
     ON t0.id = t1.id
 ) as l
 INNER JOIN (
-    SELECT t2.id, repeat(t3.val, 2) as key
+    SELECT t2.id + t3.id, repeat(t3.val, 2) as key
     FROM t2
     JOIN ( SELECT (id - 1) :: UInt64 as id , val FROM t3 ) as t3
     ON t2.attr = t3.id
 ) as r
 ON l.key = r.key
 ORDER BY l.id
+SETTINGS query_plan_merge_expression_into_join = 1
 ;
 
 SELECT * FROM (
-    SELECT t0.id, upper(t0.val) as key, lower(t1.val) as attr
+    SELECT t0.id, upper(t0.val) as key, t0.val || lower(t1.val) as attr
     FROM (SELECT id + 1 as id, val FROM t0) as t0
     JOIN ( SELECT id, val FROM t1 ) as t1
     ON t0.id = t1.id
 ) as l
 INNER JOIN (
-    SELECT t2.id, repeat(t3.val, 2) as key
+    SELECT t2.id + t3.id, repeat(t3.val, 2) as key
     FROM t2
     JOIN ( SELECT (id - 1) :: UInt64 as id , val FROM t3 ) as t3
     ON t2.attr = t3.id
