@@ -252,7 +252,6 @@ struct QueryPlanSettings
     /// Apply query plan optimizations.
     bool optimize = true;
     bool keep_logical_steps = false;
-    Int64 optimize_run_passes = -1;
     bool json = false;
 
     constexpr static char name[] = "PLAN";
@@ -274,13 +273,9 @@ struct QueryPlanSettings
             {"column_structure", query_plan_options.column_structure},
             {"compact", query_plan_options.compact},
             {"pretty", query_plan_options.pretty},
-
     };
 
-    std::unordered_map<std::string, std::reference_wrapper<Int64>> integer_settings =
-    {
-        {"optimize_run_passes", optimize_run_passes}
-    };
+    std::unordered_map<std::string, std::reference_wrapper<Int64>> integer_settings;
 };
 
 struct QueryPipelineSettings
@@ -595,8 +590,6 @@ QueryPipeline InterpreterExplainQuery::executeImpl()
                 optimization_settings.keep_logical_steps = settings.keep_logical_steps;
                 optimization_settings.is_explain = true;
                 optimization_settings.max_step_description_length = query_context->getSettingsRef()[Setting::query_plan_max_step_description_length];
-                if (settings.optimize_run_passes >= 0)
-                    optimization_settings.optimize_run_passes = safe_cast<int>(settings.optimize_run_passes);
                 plan.optimize(optimization_settings);
             }
 
