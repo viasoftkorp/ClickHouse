@@ -731,8 +731,50 @@ void buildQueryGraph(QueryGraphBuilder & query_graph, QueryPlan::Node & node, Qu
 
     auto type_changing_sides = join_step->typeChangingSides();
     bool allow_left_subgraph = !type_changing_sides.contains(JoinTableSide::Left) && (isInnerOrCross(join_kind) || isLeft(join_kind));
-    size_t lhs_count = addChildQueryGraph(query_graph, lhs_plan, nodes, lhs_label, allow_left_subgraph ? join_steps_limit - 1 : 0);
     bool allow_right_subgraph = !type_changing_sides.contains(JoinTableSide::Right) && (isInnerOrCross(join_kind) || isRight(join_kind));
+
+    /// Check if flattening children would cause column name clashes between sides.
+    if (allow_left_subgraph || allow_right_subgraph)
+    {
+        auto get_exposed_columns = [&](QueryPlan::Node * plan, bool allow_flatten) -> NameSet
+        {
+            NameSet names;
+            auto * check = plan;
+            if (allow_flatten)
+            {
+                bool merge_expression_into_join = query_graph.context->optimization_settings.merge_expression_into_join;
+                auto * expr = typeid_cast<ExpressionStep *>(check->step.get());
+                if (expr && check->children.size() == 1 && !expr->getExpression().hasArrayJoin()
+                    && (isPassthroughActions(expr->getExpression()) || merge_expression_into_join))
+                {
+                    check = check->children[0];
+                }
+                auto * js = typeid_cast<JoinStepLogical *>(check->step.get());
+                if (js && !js->isOptimized() && check->children.size() == 2)
+                {
+                    for (auto * child : check->children)
+                        for (const auto & col : *child->step->getOutputHeader())
+                            names.insert(col.name);
+                    return names;
+                }
+            }
+            for (const auto & col : *plan->step->getOutputHeader())
+                names.insert(col.name);
+            return names;
+        };
+
+        auto lhs_cols = get_exposed_columns(lhs_plan, allow_left_subgraph);
+        auto rhs_cols = get_exposed_columns(rhs_plan, allow_right_subgraph);
+
+        if (std::ranges::any_of(lhs_cols, [&](const auto & name) { return rhs_cols.contains(name); }))
+        {
+            LOG_DEBUG(getLogger("optimizeJoin"), "Column name clash detected between join sides, disabling subgraph flattening");
+            allow_left_subgraph = false;
+            allow_right_subgraph = false;
+        }
+    }
+
+    size_t lhs_count = addChildQueryGraph(query_graph, lhs_plan, nodes, lhs_label, allow_left_subgraph ? join_steps_limit - 1 : 0);
     size_t rhs_count = addChildQueryGraph(query_graph, rhs_plan, nodes, rhs_label, allow_right_subgraph ? static_cast<int>(join_steps_limit - lhs_count) : 0);
 
     size_t total_inputs = query_graph.inputs.size();
