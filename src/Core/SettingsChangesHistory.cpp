@@ -161,6 +161,8 @@ const VersionToSettingsChangesMap & getSettingsChangesHistory()
             {"ai_function_throw_on_quota_exceeded", true, true, "New setting"},
             {"variant_throw_on_type_mismatch", true, true, "New setting to control type mismatch behavior in default Variant implementation"},
             {"dynamic_throw_on_type_mismatch", true, true, "New setting to control type mismatch behavior in default Dynamic implementation"},
+            {"enable_materialized_cte", false, false, "New setting"},
+            {"query_plan_merge_expression_into_join", false, true, "New setting. Allow to merge Expression step into JOIN step during join reordering optimization."},
         });
         addSettingsChanges(settings_changes_history, "26.3",
         {
