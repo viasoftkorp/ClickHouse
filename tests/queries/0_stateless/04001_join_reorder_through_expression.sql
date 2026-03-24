@@ -20,6 +20,7 @@ CREATE TABLE t3 (id UInt64, val String) ENGINE = MergeTree ORDER BY id;
 INSERT INTO t3 VALUES (11, 'A'), (21, 'B'), (31, 'C');
 
 SET enable_join_runtime_filters = 0;
+SET query_plan_optimize_join_order_algorithm = 'greedy';
 
 EXPLAIN PLAN keep_logical_steps = 1, description = 0
 SELECT * FROM (
