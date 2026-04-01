@@ -1278,10 +1278,8 @@ static QueryPlanNode buildPhysicalJoinImpl(
         can_remove_residual_filter = true;
         required_output_nodes.emplace_back(residual_filter_condition.getNode());
     }
-    LOG_DEBUG(&Poco::Logger::get("XXXX"), "{}:{}: required_output_nodes [{}]", __FILE__, __LINE__, fmt::join(required_output_nodes | std::views::transform([](const auto * node) { return node->result_name; }), ", "));
 
     ActionsDAG residual_dag = ActionsDAG::foldActionsByProjection(actions_after_join_fold, required_output_nodes);
-    LOG_DEBUG(&Poco::Logger::get("XXXX"), "{}:{}: residual_dag\n{}", __FILE__, __LINE__, residual_dag.dumpDAG());
 
     table_join->setInputColumns(
         left_dag.getNamesAndTypesList(),

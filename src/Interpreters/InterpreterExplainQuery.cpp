@@ -32,7 +32,6 @@
 
 #include <Common/JSONBuilder.h>
 #include <Core/Settings.h>
-#include <Common/safe_cast.h>
 
 #include <Analyzer/QueryTreeBuilder.h>
 #include <Analyzer/QueryTreePassManager.h>

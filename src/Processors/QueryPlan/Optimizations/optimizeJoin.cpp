@@ -744,7 +744,7 @@ void buildQueryGraph(QueryGraphBuilder & query_graph, QueryPlan::Node & node, Qu
             {
                 bool merge_expression_into_join = query_graph.context->optimization_settings.merge_expression_into_join;
                 auto * expr = typeid_cast<ExpressionStep *>(check->step.get());
-                if (expr && check->children.size() == 1 && !expr->getExpression().hasArrayJoin()
+                if (expr && !expr->getExpression().hasArrayJoin()
                     && (isPassthroughActions(expr->getExpression()) || merge_expression_into_join))
                 {
                     check = check->children[0];
