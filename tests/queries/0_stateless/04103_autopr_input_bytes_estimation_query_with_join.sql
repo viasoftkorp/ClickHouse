@@ -48,6 +48,15 @@ SELECT count() FROM test.hits AS t1 INNER JOIN autopr_join_right_small AS t2 USI
 -- `LEFT JOIN` with aggregation on top.
 SELECT t1.CounterID, count() AS c FROM test.hits AS t1 LEFT JOIN autopr_join_right_small AS t2 USING (UserID) GROUP BY t1.CounterID ORDER BY c DESC LIMIT 10 FORMAT Null SETTINGS log_comment='04103_query_3', max_block_size=65409;
 
+-- Plain `LEFT JOIN`. Left side is parallelized (same convention as `INNER JOIN`), so statistics
+-- are collected at the `test.hits` read.
+SELECT count() FROM test.hits AS t1 LEFT JOIN autopr_join_right_small AS t2 USING (UserID) FORMAT Null SETTINGS log_comment='04103_query_4';
+
+-- `RIGHT JOIN`: the parallelized side is the right one. `autopr_join_right_small` is placed on the
+-- left so that `test.hits` (the larger table) ends up on the parallelized side, exercising the
+-- `children.at(1)` branch in `findReadingStep` that handles the `RIGHT JOIN` convention.
+SELECT count() FROM autopr_join_right_small AS t1 RIGHT JOIN test.hits AS t2 USING (UserID) FORMAT Null SETTINGS log_comment='04103_query_5';
+
 DROP TABLE autopr_join_right_small;
 
 SET enable_parallel_replicas=0, automatic_parallel_replicas_mode=0;
