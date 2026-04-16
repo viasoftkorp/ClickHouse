@@ -25,30 +25,40 @@ SET parallel_replicas_prefer_local_join=1;
 -- even though the resulting plans are logically identical. Pin the orientation until that is fixed.
 SET query_plan_join_swap_table='false';
 
--- `INNER JOIN` of two MergeTree tables, with the right side much smaller than the left.
--- With `parallel_replicas_prefer_local_join=1`, the left side is the parallelized side,
--- so the reported `RuntimeDataflowStatisticsInputBytes` should approximate the bytes read from `test.hits`.
-SELECT count() FROM test.hits AS t1 INNER JOIN test.visits AS t2 USING (UserID) FORMAT Null SETTINGS log_comment='04103_query_1';
+-- Use a tiny auxiliary `MergeTree` table as the right side of the JOIN. The autopr statistics
+-- only cover the parallelized (left) side, whereas `ReadCompressedBytes` in `system.query_log`
+-- aggregates reads from every source step, so any non-trivial right side would skew the ratio
+-- even when the estimate itself is correct. A minimal right side keeps the two quantities
+-- directly comparable.
+DROP TABLE IF EXISTS autopr_join_right_small;
+CREATE TABLE autopr_join_right_small (UserID UInt64) ENGINE = MergeTree ORDER BY UserID AS SELECT number FROM numbers(1000);
+
+-- `INNER JOIN` of `test.hits` with the tiny right-side table.
+-- With `parallel_replicas_prefer_local_join=1`, the left side is the parallelized side, so the
+-- reported `RuntimeDataflowStatisticsInputBytes` should approximate the bytes read from `test.hits`.
+SELECT count() FROM test.hits AS t1 INNER JOIN autopr_join_right_small AS t2 USING (UserID) FORMAT Null SETTINGS log_comment='04103_query_1';
 
 -- Same JOIN with a filter on the left side. `URL` is not part of the primary key, so this filter
 -- does not prune granules via PK index analysis; the full left side is still read from disk and
 -- therefore `ReadCompressedBytes` stays comparable to the collected statistics. Using a PK column
 -- like `CounterID` here would slash the number of scanned granules and make the two quantities
 -- incomparable via the simple ratio check below, since they would measure different things.
-SELECT count() FROM test.hits AS t1 INNER JOIN test.visits AS t2 USING (UserID) WHERE t1.URL LIKE '%com%' FORMAT Null SETTINGS log_comment='04103_query_2';
+SELECT count() FROM test.hits AS t1 INNER JOIN autopr_join_right_small AS t2 USING (UserID) WHERE t1.URL LIKE '%com%' FORMAT Null SETTINGS log_comment='04103_query_2';
 
 -- `LEFT JOIN` with aggregation on top.
-SELECT t1.CounterID, count() AS c FROM test.hits AS t1 LEFT JOIN test.visits AS t2 USING (UserID) GROUP BY t1.CounterID ORDER BY c DESC LIMIT 10 FORMAT Null SETTINGS log_comment='04103_query_3', max_block_size=65409;
+SELECT t1.CounterID, count() AS c FROM test.hits AS t1 LEFT JOIN autopr_join_right_small AS t2 USING (UserID) GROUP BY t1.CounterID ORDER BY c DESC LIMIT 10 FORMAT Null SETTINGS log_comment='04103_query_3', max_block_size=65409;
+
+DROP TABLE autopr_join_right_small;
 
 SET enable_parallel_replicas=0, automatic_parallel_replicas_mode=0;
 
 SYSTEM FLUSH LOGS query_log;
 
 -- Fail if the estimated input bytes deviate from `ReadCompressedBytes` by more than a factor of 2,
--- or if no statistics were collected at all (i.e. `RuntimeDataflowStatisticsInputBytes` is missing / zero).
--- For JOINs, `ReadCompressedBytes` aggregates both sides while the statistics cover only the
--- parallelized (left) side, so queries are chosen such that the right side is small enough
--- to keep the ratio within the threshold.
+-- or if no statistics were collected at all (i.e. `RuntimeDataflowStatisticsInputBytes` is missing
+-- or zero). The right side of each JOIN is a tiny `MergeTree` (1000 rows) so its contribution to
+-- `ReadCompressedBytes` is negligible and the ratio reflects the accuracy of the left-side
+-- estimate.
 SELECT format('{} {} {}', log_comment, compressed_bytes, statistics_input_bytes)
 FROM (
     SELECT
