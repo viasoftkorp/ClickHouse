@@ -36,6 +36,12 @@ public:
 
     String getName() const override { return "Join"; }
 
+    /// `JoinStep` itself does not collect any dataflow statistics; it merely passes through.
+    /// Statistics are collected at the `ReadFromMergeTree` on the parallelized side and at the
+    /// top node above the JOIN (e.g. `Aggregating`). Returning `true` here allows plans with
+    /// JOINs to pass the "plan is simple enough" check in `considerEnablingParallelReplicas`.
+    bool supportsDataflowStatisticsCollection() const override { return true; }
+
     QueryPipelineBuilderPtr updatePipeline(QueryPipelineBuilders pipelines, const BuildQueryPipelineSettings &) override;
 
     void describePipeline(FormatSettings & settings) const override;

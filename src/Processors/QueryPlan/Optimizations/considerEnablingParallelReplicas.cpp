@@ -5,7 +5,10 @@
 #include <Processors/QueryPlan/ExpressionStep.h>
 #include <Processors/QueryPlan/FilterStep.h>
 #include <Processors/QueryPlan/JoinLazyColumnsStep.h>
+#include <Processors/QueryPlan/JoinStep.h>
 #include <Processors/QueryPlan/ReadFromMergeTree.h>
+#include <Interpreters/IJoin.h>
+#include <Interpreters/TableJoin.h>
 #include <Processors/QueryPlan/ReadFromRemote.h>
 #include <Processors/QueryPlan/UnionStep.h>
 #include <Processors/QueryPlan/Optimizations/Optimizations.h>
@@ -163,6 +166,20 @@ ReadFromMergeTree * findReadingStep(const QueryPlan::Node & top_of_single_replic
     {
         // TODO(nickitat): support multiple read steps with parallel replicas
         const auto * lazy_joining = typeid_cast<const JoinLazyColumnsStep *>(reading_step->step.get());
+        const auto * join = typeid_cast<const JoinStep *>(reading_step->step.get());
+
+        if (join)
+        {
+            /// For a `JoinStep` executed under `parallel_replicas_prefer_local_join`, only one side is
+            /// parallelized across replicas; the other side is read in full by every replica. Pick the
+            /// parallelized side here — the same convention used by `ParallelReplicasLocalPlan::findReadingStep`
+            /// when wiring the coordinator to a single `ReadFromMergeTree`.
+            if (reading_step->children.size() != 2)
+                return nullptr;
+            const auto kind = join->getJoin()->getTableJoin().kind();
+            reading_step = reading_step->children.at(kind == JoinKind::Right ? 1 : 0);
+            continue;
+        }
 
         if (!lazy_joining && reading_step->children.size() > 1)
             return nullptr;

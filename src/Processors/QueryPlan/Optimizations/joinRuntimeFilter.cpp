@@ -13,7 +13,7 @@
 #include <Core/ColumnWithTypeAndName.h>
 #include <Core/Settings.h>
 #include <Common/Exception.h>
-#include <Common/thread_local_rng.h>
+#include <Common/SipHash.h>
 #include <Common/logger_useful.h>
 #include <DataTypes/DataTypeTuple.h>
 #include <Functions/tuple.h>
@@ -217,7 +217,47 @@ bool tryAddJoinRuntimeFilter(QueryPlan::Node & node, QueryPlan::Nodes & nodes, c
             total_join_on_predicates_count, join_keys_probe_side.size(), join_keys_build_side.size());
     }
 
-    const String filter_name_prefix = fmt::format("{}_runtime_filter_{}", check_left_does_not_contain ? "_exclusion_" : "", thread_local_rng());
+    /// Derive a stable fingerprint of this runtime filter from the join's structural properties.
+    /// Must be deterministic so that when the same query plan is built more than once (for example
+    /// by `considerEnablingParallelReplicas`, which constructs a separate parallel-replicas plan in
+    /// parallel to the local one), both builds produce the same filter name. Otherwise downstream
+    /// `Filter` steps embed different filter names in their `__applyFilter(...)` actions and hash
+    /// to different keys, preventing plan-node matching.
+    ///
+    /// Uniqueness across joins in the same plan is preserved because different joins differ in at
+    /// least one of the signature components hashed below.
+    SipHash filter_name_hash;
+    filter_name_hash.update(join_step->getSerializationName());
+    filter_name_hash.update(static_cast<uint8_t>(join_operator.kind));
+    filter_name_hash.update(static_cast<uint8_t>(join_operator.strictness));
+    filter_name_hash.update(static_cast<uint8_t>(join_operator.locality));
+    filter_name_hash.update(check_left_does_not_contain);
+    filter_name_hash.update(total_join_on_predicates_count);
+    auto hash_update_keys = [&](const ColumnsWithTypeAndName & keys)
+    {
+        filter_name_hash.update(keys.size());
+        for (const auto & key : keys)
+        {
+            filter_name_hash.update(key.name);
+            filter_name_hash.update(key.type->getName());
+        }
+    };
+    hash_update_keys(join_keys_probe_side);
+    hash_update_keys(join_keys_build_side);
+    auto hash_update_header = [&](const Block & header)
+    {
+        filter_name_hash.update(header.columns());
+        for (const auto & col : header)
+        {
+            filter_name_hash.update(col.name);
+            filter_name_hash.update(col.type->getName());
+        }
+    };
+    hash_update_header(*apply_filter_node->step->getOutputHeader());
+    hash_update_header(*build_filter_node->step->getOutputHeader());
+    const String filter_name_prefix = fmt::format("{}_runtime_filter_{:016x}",
+        check_left_does_not_contain ? "_exclusion_" : "",
+        filter_name_hash.get64());
 
     /// Compute common types for each key pair
     DataTypes common_types;

@@ -26,6 +26,11 @@ public:
     BuildRuntimeFilterStep(const BuildRuntimeFilterStep & other) = default;
 
     String getName() const override { return "BuildRuntimeFilter"; }
+
+    /// The step does not modify rows; it only observes them to build a runtime filter. Allowing
+    /// it to appear in the plan unblocks `considerEnablingParallelReplicas` for JOIN queries.
+    bool supportsDataflowStatisticsCollection() const override { return true; }
+
     void transformPipeline(QueryPipelineBuilder & pipeline, const BuildQueryPipelineSettings & settings) override;
 
     const String & getFilterColumnName() const { return filter_column_name; }
