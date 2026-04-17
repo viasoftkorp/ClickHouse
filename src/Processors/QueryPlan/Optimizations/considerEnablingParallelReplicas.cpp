@@ -1,19 +1,20 @@
 #include <Processors/QueryPlan/Optimizations/considerEnablingParallelReplicas.h>
 
+#include <Interpreters/IJoin.h>
 #include <Interpreters/PreparedSets.h>
+#include <Interpreters/TableJoin.h>
+#include <Processors/QueryPlan/BuildRuntimeFilterStep.h>
 #include <Processors/QueryPlan/CreatingSetsStep.h>
 #include <Processors/QueryPlan/ExpressionStep.h>
 #include <Processors/QueryPlan/FilterStep.h>
 #include <Processors/QueryPlan/JoinLazyColumnsStep.h>
 #include <Processors/QueryPlan/JoinStep.h>
-#include <Processors/QueryPlan/ReadFromMergeTree.h>
-#include <Interpreters/IJoin.h>
-#include <Interpreters/TableJoin.h>
-#include <Processors/QueryPlan/ReadFromRemote.h>
-#include <Processors/QueryPlan/UnionStep.h>
 #include <Processors/QueryPlan/Optimizations/Optimizations.h>
 #include <Processors/QueryPlan/Optimizations/RuntimeDataflowStatistics.h>
 #include <Processors/QueryPlan/Optimizations/Utils.h>
+#include <Processors/QueryPlan/ReadFromMergeTree.h>
+#include <Processors/QueryPlan/ReadFromRemote.h>
+#include <Processors/QueryPlan/UnionStep.h>
 #include <Common/Exception.h>
 #include <Common/Logger.h>
 #include <Common/logger_useful.h>
@@ -245,6 +246,12 @@ void moveSetsFromLocalPlanToReplicasPlan(const QueryPlan & single_replica_plan, 
             }
         });
 }
+
+template <typename... Ts>
+constexpr bool isOneOf(const auto * ptr)
+{
+    return (typeid_cast<const Ts *>(ptr) || ...);
+}
 }
 
 namespace QueryPlanOptimizations
@@ -263,8 +270,10 @@ void considerEnablingParallelReplicas(
     Stack stack;
     // Technically, it isn't required for all steps to support dataflow statistics collection,
     // but only for those that we will actually instrument (see `setRuntimeDataflowStatisticsCacheUpdater` calls below).
-    // However, currently only relatively simple plans are supported (no JOINs, CreatingSets from subqueries, UNIONs, etc.),
-    // since all these steps obviously don't support statistics collection, `supportsDataflowStatisticsCollection` is handy to check if the plan is simple enough.
+    // However, currently only relatively simple plans are supported (no UNIONs, etc.),
+    // since such steps obviously don't support statistics collection, `supportsDataflowStatisticsCollection` is handy to check if the plan is simple enough.
+    // `JoinStep`, `BuildRuntimeFilterStep`, and `*CreatingSetsStep` don't collect statistics themselves but always appear below the instrumented top node,
+    // so they are allowed to pass through the check.
     bool plan_is_simple_enough = true;
     traverseQueryPlan(
         stack,
@@ -272,8 +281,7 @@ void considerEnablingParallelReplicas(
         [&](auto & frame_node)
         {
             plan_is_simple_enough &= frame_node.step->supportsDataflowStatisticsCollection()
-                || typeid_cast<const DelayedCreatingSetsStep *>(frame_node.step.get())
-                || typeid_cast<const CreatingSetsStep *>(frame_node.step.get());
+                || isOneOf<JoinStep, BuildRuntimeFilterStep, DelayedCreatingSetsStep, CreatingSetsStep>(frame_node.step.get());
         });
     if (!plan_is_simple_enough)
     {

@@ -21,8 +21,9 @@ SET parallel_replicas_prefer_local_join=1;
 
 -- `query_plan_join_swap_table='auto'` can make `considerEnablingParallelReplicas` and the
 -- `query_plan_with_parallel_replicas_builder` reach different swap decisions for the same query,
--- which in turn causes their `PrewhereInfo.prewhere_actions` `ActionsDAG`s to hash differently
--- even though the resulting plans are logically identical. Pin the orientation until that is fixed.
+-- because the parallel-replicas plan is optimized with `query_plan_optimize_join_order_limit`
+-- forced to `0` (whenever `allow_experimental_parallel_reading_from_replicas` is enabled) while
+-- the single-replica plan runs the DP join-order optimizer. Pin the orientation until that is fixed.
 SET query_plan_join_swap_table='false';
 
 -- Use a tiny auxiliary `MergeTree` table as the right side of the JOIN. The autopr statistics
@@ -40,9 +41,7 @@ SELECT count() FROM test.hits AS t1 INNER JOIN autopr_join_right_small AS t2 USI
 
 -- Same JOIN with a filter on the left side. `URL` is not part of the primary key, so this filter
 -- does not prune granules via PK index analysis; the full left side is still read from disk and
--- therefore `ReadCompressedBytes` stays comparable to the collected statistics. Using a PK column
--- like `CounterID` here would slash the number of scanned granules and make the two quantities
--- incomparable via the simple ratio check below, since they would measure different things.
+-- therefore `ReadCompressedBytes` stays comparable to the collected statistics.
 SELECT count() FROM test.hits AS t1 INNER JOIN autopr_join_right_small AS t2 USING (UserID) WHERE t1.URL LIKE '%com%' FORMAT Null SETTINGS log_comment='04103_query_2';
 
 -- `LEFT JOIN` with aggregation on top.
@@ -64,10 +63,7 @@ SET enable_parallel_replicas=0, automatic_parallel_replicas_mode=0;
 SYSTEM FLUSH LOGS query_log;
 
 -- Fail if the estimated input bytes deviate from `ReadCompressedBytes` by more than a factor of 2,
--- or if no statistics were collected at all (i.e. `RuntimeDataflowStatisticsInputBytes` is missing
--- or zero). The right side of each JOIN is a tiny `MergeTree` (1000 rows) so its contribution to
--- `ReadCompressedBytes` is negligible and the ratio reflects the accuracy of the left-side
--- estimate.
+-- or if no statistics were collected at all.
 SELECT format('{} {} {}', log_comment, compressed_bytes, statistics_input_bytes)
 FROM (
     SELECT
