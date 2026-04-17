@@ -3,9 +3,13 @@
 
 #include <Core/Joins.h>
 #include <IO/WriteHelpers.h>
+#include <Interpreters/ActionsDAG.h>
+#include <Interpreters/IJoin.h>
 #include <Interpreters/SetSerialization.h>
 #include <Interpreters/TableJoin.h>
+#include <Processors/QueryPlan/FilterStep.h>
 #include <Processors/QueryPlan/ITransformingStep.h>
+#include <Processors/QueryPlan/JoinStep.h>
 #include <Processors/QueryPlan/JoinStepLogical.h>
 #include <Processors/QueryPlan/ReadFromRemote.h>
 #include <Processors/QueryPlan/Serialization.h>
@@ -49,21 +53,36 @@ UInt64 calculateHashFromStep(const ITransformingStep & transform)
 {
     // The purpose of `HashTablesStatistics` is to provide cardinality estimations.
     // Steps that preserve the number of input rows do not affect cardinality, so we can skip them.
-    if (!transform.getTransformTraits().preserves_number_of_rows)
+    if (transform.getTransformTraits().preserves_number_of_rows)
+        return 0;
+
+    /// Runtime-join-filter `FilterStep`s (where the only output is `__applyFilter(runtime_filter_*,
+    /// ...)`) are moved between children of a `JoinStep` when the DP optimizer swaps sides. They
+    /// carry no information that differentiates two plans — just a bloom-filter test on a join key
+    /// — so from hashing's perspective they are equivalent to an `ExpressionStep` doing the same
+    /// column aliasing. Treat them the same way `ExpressionStep` is treated (contribute nothing to
+    /// the parent hash) so that a subtree on one side of the JOIN in one plan matches the
+    /// equivalent subtree on the opposite side of the JOIN in the other plan.
+    if (const auto * filter = typeid_cast<const FilterStep *>(&transform))
     {
-        WriteBufferFromOwnString wbuf;
-        SerializedSetsRegistry registry;
-        IQueryPlanStep::Serialization ctx{.out = wbuf, .registry = registry, .skip_final_flag = true, .skip_cache_key = true};
-
-        writeStringBinary(transform.getSerializationName(), wbuf);
-        if (transform.isSerializable())
-            transform.serialize(ctx);
-
-        SipHash hash;
-        hash.update(wbuf.str());
-        return hash.get64();
+        const auto & dag = filter->getExpression();
+        const auto * filter_node = dag.tryFindInOutputs(filter->getFilterColumnName());
+        if (filter_node && filter_node->type == ActionsDAG::ActionType::FUNCTION && filter_node->function_base
+            && filter_node->function_base->getName() == "__applyFilter")
+            return 0;
     }
-    return 0;
+
+    WriteBufferFromOwnString wbuf;
+    SerializedSetsRegistry registry;
+    IQueryPlanStep::Serialization ctx{.out = wbuf, .registry = registry, .skip_final_flag = true, .skip_cache_key = true};
+
+    writeStringBinary(transform.getSerializationName(), wbuf);
+    if (transform.isSerializable())
+        transform.serialize(ctx);
+
+    SipHash hash;
+    hash.update(wbuf.str());
+    return hash.get64();
 }
 
 }
@@ -171,8 +190,36 @@ void calculateHashTableCacheKeys(
             continue;
         }
 
-        for (const auto * child : node.children)
-            frame.hash.update(cache_keys[child]);
+        /// For a JOIN whose children are semantically interchangeable (INNER/FULL/CROSS/Comma), hash
+        /// its children symmetrically so that a DP-driven swap that only reorders the children — but
+        /// does not rename columns or rewrite predicates — does not cause the subtree hash to diverge
+        /// between the single-replica plan and the parallel-replicas plan built by
+        /// `considerEnablingParallelReplicas`. Outer joins (`LEFT`/`RIGHT`) remain order-sensitive
+        /// because the DP optimizer flips the kind when it swaps their sides, and encoding that joint
+        /// canonicalization is not needed for the current tests.
+        if (const auto * join_step = dynamic_cast<const JoinStep *>(node.step.get()); join_step && node.children.size() == 2)
+        {
+            const auto kind = join_step->getJoin()->getTableJoin().kind();
+            if (isInner(kind) || isFull(kind) || isCrossOrComma(kind))
+            {
+                auto a = cache_keys[node.children.at(0)];
+                auto b = cache_keys[node.children.at(1)];
+                if (a > b)
+                    std::swap(a, b);
+                frame.hash.update(a);
+                frame.hash.update(b);
+            }
+            else
+            {
+                for (const auto * child : node.children)
+                    frame.hash.update(cache_keys[child]);
+            }
+        }
+        else
+        {
+            for (const auto * child : node.children)
+                frame.hash.update(cache_keys[child]);
+        }
 
         if (const auto * source = dynamic_cast<const ReadFromParallelRemoteReplicasStep *>(node.step.get()))
             frame.hash.update(calculateHashFromStep(*source));
@@ -186,6 +233,28 @@ void calculateHashTableCacheKeys(
         const auto raw = frame.hash.get64();
         raw_hashes[&node] = raw;
         cache_keys[&node] = raw;
+
+        /// Any transforming step that preserves the number of rows carries no cost-relevant
+        /// information for `HashTablesStatistics` — it's pure column-level rewriting. Make those
+        /// steps fully transparent so that structural differences between the two plan builds
+        /// that only add/remove such steps (e.g. a probe-side `Filter(__applyFilter)` vs a
+        /// build-side `Expression(Change col)` + `BuildRuntimeFilter`) collapse to the same
+        /// subtree cache key on both sides of a DP join swap.
+        if (const auto * transform = dynamic_cast<const ITransformingStep *>(node.step.get()))
+        {
+            chassert(node.children.size() == 1);
+            const bool is_runtime_filter = [&]
+            {
+                const auto * filter = typeid_cast<const FilterStep *>(node.step.get());
+                if (!filter)
+                    return false;
+                const auto * filter_node = filter->getExpression().tryFindInOutputs(filter->getFilterColumnName());
+                return filter_node && filter_node->type == ActionsDAG::ActionType::FUNCTION && filter_node->function_base
+                    && filter_node->function_base->getName() == "__applyFilter";
+            }();
+            if (transform->getTransformTraits().preserves_number_of_rows || is_runtime_filter)
+                cache_keys[&node] = cache_keys[node.children.front()];
+        }
 
         stack.pop_back();
     }

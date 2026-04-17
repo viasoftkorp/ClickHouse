@@ -19,13 +19,6 @@ set enable_filesystem_cache=1;
 
 SET parallel_replicas_prefer_local_join=1;
 
--- `query_plan_join_swap_table='auto'` can make `considerEnablingParallelReplicas` and the
--- `query_plan_with_parallel_replicas_builder` reach different swap decisions for the same query,
--- because the parallel-replicas plan is optimized with `query_plan_optimize_join_order_limit`
--- forced to `0` (whenever `allow_experimental_parallel_reading_from_replicas` is enabled) while
--- the single-replica plan runs the DP join-order optimizer. Pin the orientation until that is fixed.
-SET query_plan_join_swap_table='false';
-
 -- Use a tiny auxiliary `MergeTree` table as the right side of the JOIN. The autopr statistics
 -- only cover the parallelized (left) side, whereas `ReadCompressedBytes` in `system.query_log`
 -- aggregates reads from every source step, so any non-trivial right side would skew the ratio
@@ -53,8 +46,20 @@ SELECT count() FROM test.hits AS t1 LEFT JOIN autopr_join_right_small AS t2 USIN
 
 -- `RIGHT JOIN`: the parallelized side is the right one. `autopr_join_right_small` is placed on the
 -- left so that `test.hits` (the larger table) ends up on the parallelized side, exercising the
--- `children.at(1)` branch in `findReadingStep` that handles the `RIGHT JOIN` convention.
-SELECT count() FROM autopr_join_right_small AS t1 RIGHT JOIN test.hits AS t2 USING (UserID) FORMAT Null SETTINGS log_comment='04103_query_5';
+-- `children.at(1)` branch in `findReadingStep` that handles the `RIGHT JOIN` convention. Swap is
+-- pinned off because the DP optimizer rewrites `A RIGHT JOIN B` to `B LEFT JOIN A` (kind flip +
+-- side swap) under `query_plan_join_swap_table='auto'`, and the hash normalization here doesn't
+-- yet canonicalize the `LEFT`/`RIGHT` pair.
+SELECT count() FROM autopr_join_right_small AS t1 RIGHT JOIN test.hits AS t2 USING (UserID) FORMAT Null SETTINGS log_comment='04103_query_5', query_plan_join_swap_table='false';
+
+-- `INNER JOIN` with the small table on the SQL-left side. The DP join-order optimizer swaps the
+-- sides so that `test.hits` ends up as the left (probe) child of the physical `JoinStep` while the
+-- parallel-replicas plan keeps the original order (its DP limit is forced to `0` by the presence
+-- of `allow_experimental_parallel_reading_from_replicas`). Commutative hashing at the `JoinStep`
+-- level together with the transparency of row-preserving transforms (incl. runtime-filter
+-- `FilterStep` / `BuildRuntimeFilter` / `Expression`) keeps the top-of-replicas hash stable across
+-- the swap so autopr's node matching succeeds.
+SELECT count() FROM autopr_join_right_small AS t1 INNER JOIN test.hits AS t2 USING (UserID) FORMAT Null SETTINGS log_comment='04103_query_6';
 
 DROP TABLE autopr_join_right_small;
 
