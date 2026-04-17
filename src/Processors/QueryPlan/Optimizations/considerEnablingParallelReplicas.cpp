@@ -130,34 +130,50 @@ std::pair<const QueryPlan::Node *, size_t> findCorrespondingNodeInSingleNodePlan
     QueryPlan::Node & single_replica_plan_root)
 {
     auto pr_node_hashes = calculateHashTableCacheKeys(parallel_replicas_plan_root);
-    if (auto it = pr_node_hashes.find(&final_node_in_replica_plan); it != pr_node_hashes.end())
+    auto it = pr_node_hashes.find(&final_node_in_replica_plan);
+    if (it == pr_node_hashes.end())
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Cannot find replicas_plan_top_node in hash table");
+
+    auto nopr_node_hashes = calculateHashTableCacheKeys(single_replica_plan_root);
+
+    /// Transparent steps (`ExpressionStep` via `preserves_number_of_rows`, runtime-filter
+    /// `FilterStep`, `BuildRuntimeFilterStep`) inherit their child's cache key, so several nodes on
+    /// a single subtree can share the same hash. When that happens we want the match that points at
+    /// the step that actually collects statistics — the one with the same kind as the top-of-
+    /// replicas node in the PR plan. Fall back to any hash-matching node only if no same-kind
+    /// match exists.
+    const auto & target_name = final_node_in_replica_plan.step->getName();
+    const QueryPlan::Node * best = nullptr;
+    for (const auto & [nopr_node, nopr_hash] : nopr_node_hashes)
     {
-        auto nopr_node_hashes = calculateHashTableCacheKeys(single_replica_plan_root);
-
-        for (const auto & [nopr_node, nopr_hash] : nopr_node_hashes)
+        if (nopr_hash != it->second)
+            continue;
+        if (nopr_node->step->getName() == target_name)
         {
-            if (nopr_hash == it->second)
-            {
-                if (!nopr_node->step->supportsDataflowStatisticsCollection())
-                {
-                    LOG_DEBUG(
-                        getLogger("optimizeTree"),
-                        "Step ({}) doesn't support dataflow statistics collection. Skipping statistics collection",
-                        nopr_node->step->getName());
-                    return std::make_pair(nullptr, 0);
-                }
-
-                LOG_DEBUG(getLogger("optimizeTree"), "Found matching node in original plan: {}", nopr_node->step->getName());
-                return std::make_pair(nopr_node, nopr_hash);
-            }
+            best = nopr_node;
+            break;
         }
+        if (!best)
+            best = nopr_node;
+    }
+
+    if (!best)
+    {
         LOG_DEBUG(getLogger("optimizeTree"), "Cannot find step with matching hash in single-node plan");
         return std::make_pair(nullptr, 0);
     }
-    else
+
+    if (!best->step->supportsDataflowStatisticsCollection())
     {
-        throw Exception(ErrorCodes::LOGICAL_ERROR, "Cannot find replicas_plan_top_node in hash table");
+        LOG_DEBUG(
+            getLogger("optimizeTree"),
+            "Step ({}) doesn't support dataflow statistics collection. Skipping statistics collection",
+            best->step->getName());
+        return std::make_pair(nullptr, 0);
     }
+
+    LOG_DEBUG(getLogger("optimizeTree"), "Found matching node in original plan: {}", best->step->getName());
+    return std::make_pair(best, it->second);
 }
 
 ReadFromMergeTree * findReadingStep(const QueryPlan::Node & top_of_single_replica_plan)
