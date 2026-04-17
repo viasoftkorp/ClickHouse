@@ -46,11 +46,8 @@ SELECT count() FROM test.hits AS t1 LEFT JOIN autopr_join_right_small AS t2 USIN
 
 -- `RIGHT JOIN`: the parallelized side is the right one. `autopr_join_right_small` is placed on the
 -- left so that `test.hits` (the larger table) ends up on the parallelized side, exercising the
--- `children.at(1)` branch in `findReadingStep` that handles the `RIGHT JOIN` convention. Swap is
--- pinned off because the DP optimizer rewrites `A RIGHT JOIN B` to `B LEFT JOIN A` (kind flip +
--- side swap) under `query_plan_join_swap_table='auto'`, and the hash normalization here doesn't
--- yet canonicalize the `LEFT`/`RIGHT` pair.
-SELECT count() FROM autopr_join_right_small AS t1 RIGHT JOIN test.hits AS t2 USING (UserID) FORMAT Null SETTINGS log_comment='04103_query_5', query_plan_join_swap_table='false';
+-- `children.at(1)` branch in `findReadingStep` that handles the `RIGHT JOIN` convention.
+SELECT count() FROM autopr_join_right_small AS t1 RIGHT JOIN test.hits AS t2 USING (UserID) FORMAT Null SETTINGS log_comment='04103_query_5';
 
 -- `INNER JOIN` with the small table on the SQL-left side. The DP join-order optimizer swaps the
 -- sides so that `test.hits` ends up as the left (probe) child of the physical `JoinStep` while the

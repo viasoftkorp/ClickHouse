@@ -1,3 +1,4 @@
+#include <functional>
 #include <unordered_map>
 #include <Processors/QueryPlan/Optimizations/Optimizations.h>
 
@@ -16,6 +17,7 @@
 #include <Processors/QueryPlan/SourceStepWithFilter.h>
 #include <Storages/IStorage.h>
 #include <Common/SipHash.h>
+#include <Common/logger_useful.h>
 
 using namespace DB;
 
@@ -45,7 +47,73 @@ UInt64 calculateHashFromStep(const SourceStepWithFilter & read)
         table_name = storage_id.getFullTableName();
     }
     if (const auto & dag = read.getPrewhereInfo())
-        dag->prewhere_actions.updateHash(hash);
+    {
+        /// Hash the filter-expression subtree only (rooted at `prewhere_column_name`), and strip
+        /// `__applyFilter(_runtime_filter_*, ...)` contributions along the way. The runtime filter
+        /// is pushed into the prewhere only on the probe side of a JOIN, so its presence depends on
+        /// which join side the DP optimizer happened to route this table to. The underlying storage
+        /// read is the same either way — see the matching transparency treatment in the
+        /// `FilterStep` path below.
+        ///
+        /// We hash only the filter subtree rather than the whole `prewhere_actions` DAG because the
+        /// DAG's output list also carries pass-through columns that the downstream plan consumes;
+        /// those pass-through outputs differ between the two plan builds exactly because the probe
+        /// side's filter DAG has to propagate its extra input through to the downstream JOIN.
+        /// Hashing just the filter expression sidesteps that bookkeeping and captures the
+        /// cost-relevant part of the prewhere.
+        auto is_runtime_filter = [](const ActionsDAG::Node * n)
+        {
+            return n && n->type == ActionsDAG::ActionType::FUNCTION && n->function_base
+                && n->function_base->getName() == "__applyFilter";
+        };
+        std::function<void(const ActionsDAG::Node *, SipHash &)> hash_filter_expr
+            = [&](const ActionsDAG::Node * node, SipHash & h)
+        {
+            if (is_runtime_filter(node))
+                return;
+
+            /// `and(..., __applyFilter(...), ...)` simplifies to the AND of the remaining
+            /// conditions; if only one non-runtime-filter child is left, the AND collapses to that
+            /// child; if none are left, the filter becomes trivially true and we emit nothing.
+            if (node->type == ActionsDAG::ActionType::FUNCTION && node->function_base
+                && node->function_base->getName() == "and")
+            {
+                std::vector<const ActionsDAG::Node *> survivors;
+                survivors.reserve(node->children.size());
+                for (const auto * child : node->children)
+                    if (!is_runtime_filter(child))
+                        survivors.push_back(child);
+
+                if (survivors.empty())
+                    return;
+                if (survivors.size() == 1)
+                {
+                    hash_filter_expr(survivors.front(), h);
+                    return;
+                }
+                h.update(uint8_t(node->type));
+                h.update(node->function_base->getName());
+                for (const auto * child : survivors)
+                    hash_filter_expr(child, h);
+                return;
+            }
+
+            h.update(uint8_t(node->type));
+            h.update(node->result_name);
+            if (node->result_type)
+                h.update(node->result_type->getName());
+            if (node->function_base)
+                h.update(node->function_base->getName());
+            if (node->column)
+                h.update(node->column->getName());
+            for (const auto * child : node->children)
+                hash_filter_expr(child, h);
+        };
+
+        const auto * filter_root = dag->prewhere_actions.tryFindInOutputs(dag->prewhere_column_name);
+        if (filter_root)
+            hash_filter_expr(filter_root, hash);
+    }
     return hash.get64();
 }
 
@@ -190,30 +258,28 @@ void calculateHashTableCacheKeys(
             continue;
         }
 
-        /// For a JOIN whose children are semantically interchangeable (INNER/FULL/CROSS/Comma), hash
-        /// its children symmetrically so that a DP-driven swap that only reorders the children — but
-        /// does not rename columns or rewrite predicates — does not cause the subtree hash to diverge
-        /// between the single-replica plan and the parallel-replicas plan built by
-        /// `considerEnablingParallelReplicas`. Outer joins (`LEFT`/`RIGHT`) remain order-sensitive
-        /// because the DP optimizer flips the kind when it swaps their sides, and encoding that joint
-        /// canonicalization is not needed for the current tests.
+        /// Canonicalize `JoinStep` children order so DP-driven side swaps don't cause the subtree
+        /// hash to diverge between the single-replica and parallel-replicas plan builds in
+        /// `considerEnablingParallelReplicas`. For commutative kinds (`INNER`/`FULL`/`CROSS`/`Comma`)
+        /// sort children by their cache key. For `LEFT`/`RIGHT` rely on the equivalence
+        /// `A LEFT JOIN B ≡ B RIGHT JOIN A`: emit the children in `LEFT`-anchored order by swapping
+        /// them when the step is a `RIGHT` JOIN. Other kinds keep their existing order.
         if (const auto * join_step = dynamic_cast<const JoinStep *>(node.step.get()); join_step && node.children.size() == 2)
         {
             const auto kind = join_step->getJoin()->getTableJoin().kind();
+            auto a = cache_keys[node.children.at(0)];
+            auto b = cache_keys[node.children.at(1)];
             if (isInner(kind) || isFull(kind) || isCrossOrComma(kind))
             {
-                auto a = cache_keys[node.children.at(0)];
-                auto b = cache_keys[node.children.at(1)];
                 if (a > b)
                     std::swap(a, b);
-                frame.hash.update(a);
-                frame.hash.update(b);
             }
-            else
+            else if (isRight(kind))
             {
-                for (const auto * child : node.children)
-                    frame.hash.update(cache_keys[child]);
+                std::swap(a, b);
             }
+            frame.hash.update(a);
+            frame.hash.update(b);
         }
         else
         {
@@ -254,6 +320,13 @@ void calculateHashTableCacheKeys(
             }();
             if (transform->getTransformTraits().preserves_number_of_rows || is_runtime_filter)
                 cache_keys[&node] = cache_keys[node.children.front()];
+        }
+
+        {
+            std::string child_str;
+            for (const auto * c : node.children)
+                child_str += fmt::format(" c={}", cache_keys[c]);
+            LOG_DEBUG(getLogger("hk"), "{}{} -> {}", node.step->getName(), child_str, cache_keys[&node]);
         }
 
         stack.pop_back();
