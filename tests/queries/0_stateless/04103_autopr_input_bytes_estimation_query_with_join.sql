@@ -49,14 +49,17 @@ SELECT count() FROM test.hits AS t1 LEFT JOIN autopr_join_right_small AS t2 USIN
 -- `children.at(1)` branch in `findReadingStep` that handles the `RIGHT JOIN` convention.
 SELECT count() FROM autopr_join_right_small AS t1 RIGHT JOIN test.hits AS t2 USING (UserID) FORMAT Null SETTINGS log_comment='04103_query_5';
 
--- `INNER JOIN` with the small table on the SQL-left side. The DP join-order optimizer swaps the
--- sides so that `test.hits` ends up as the left (probe) child of the physical `JoinStep` while the
--- parallel-replicas plan keeps the original order (its DP limit is forced to `0` by the presence
--- of `allow_experimental_parallel_reading_from_replicas`). Commutative hashing at the `JoinStep`
--- level together with the transparency of row-preserving transforms (incl. runtime-filter
--- `FilterStep` / `BuildRuntimeFilter` / `Expression`) keeps the top-of-replicas hash stable across
--- the swap so autopr's node matching succeeds.
-SELECT count() FROM autopr_join_right_small AS t1 INNER JOIN test.hits AS t2 USING (UserID) FORMAT Null SETTINGS log_comment='04103_query_6';
+-- `INNER JOIN` with the small table on the SQL-left side. The test forces `query_plan_join_swap_table='true'`
+-- here (the randomizer would otherwise pin it to `'false'`) so that the DP join-order optimizer
+-- actually swaps the sides. With the swap, `test.hits` ends up as the left (probe) child of the
+-- physical `JoinStep` on the single-replica plan, while the parallel-replicas plan keeps the
+-- original order (its DP limit is forced to `0` by the presence of
+-- `allow_experimental_parallel_reading_from_replicas`). Commutative hashing at the `JoinStep` level
+-- together with the transparency of row-preserving transforms (incl. runtime-filter `FilterStep` /
+-- `BuildRuntimeFilter` / `Expression`) keeps the top-of-replicas hash stable across the swap so
+-- autopr's node matching succeeds — and with hits as the parallelized side, the collected
+-- statistics reflect bytes read from the large table, comparable to `ReadCompressedBytes`.
+SELECT count() FROM autopr_join_right_small AS t1 INNER JOIN test.hits AS t2 USING (UserID) FORMAT Null SETTINGS log_comment='04103_query_6', query_plan_join_swap_table='true';
 
 DROP TABLE autopr_join_right_small;
 
