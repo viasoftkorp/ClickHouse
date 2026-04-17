@@ -15,6 +15,13 @@ SET max_bytes_before_external_sort=0, max_bytes_ratio_before_external_sort=0;
 -- Override randomized max_threads to avoid timeout on slow builds (ASan)
 SET max_threads=0;
 
+-- `AggregatingStep::supportsDataflowStatisticsCollection` returns `false` when
+-- `sort_description_for_merging` is populated, which happens under
+-- `optimize_aggregation_in_order=1`. That makes the plan-simplicity check in
+-- `considerEnablingParallelReplicas` bail and no statistics are collected for the GROUP BY
+-- query. Pin the setting off so the randomizer doesn't silently drop autopr here.
+SET optimize_aggregation_in_order=0;
+
 set enable_filesystem_cache=1;
 
 SET parallel_replicas_prefer_local_join=1;
@@ -59,7 +66,7 @@ SELECT count() FROM autopr_join_right_small AS t1 RIGHT JOIN test.hits AS t2 USI
 -- `BuildRuntimeFilter` / `Expression`) keeps the top-of-replicas hash stable across the swap so
 -- autopr's node matching succeeds — and with hits as the parallelized side, the collected
 -- statistics reflect bytes read from the large table, comparable to `ReadCompressedBytes`.
-SELECT count() FROM autopr_join_right_small AS t1 INNER JOIN test.hits AS t2 USING (UserID) FORMAT Null SETTINGS log_comment='04103_query_6', query_plan_join_swap_table='true';
+SELECT count() FROM autopr_join_right_small AS t1 INNER JOIN test.hits AS t2 USING (UserID) FORMAT Null SETTINGS log_comment='04103_query_6', query_plan_join_swap_table='true', query_plan_optimize_join_order_limit=10;
 
 DROP TABLE autopr_join_right_small;
 
