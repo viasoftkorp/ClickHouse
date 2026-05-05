@@ -797,6 +797,18 @@ void alter(
     persistent_table_components.invalidateMetadataCache();
 }
 
+void alterPartition(
+    const PartitionCommands & params,
+    ContextPtr context,
+    ObjectStoragePtr object_storage,
+    const DataLakeStorageSettings & data_lake_settings,
+    const PersistentTableComponents & persistent_table_components,
+    const String & write_format)
+{
+
+}
+
+
 #endif
 
 }

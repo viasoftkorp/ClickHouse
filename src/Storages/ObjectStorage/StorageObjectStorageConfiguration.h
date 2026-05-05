@@ -11,6 +11,7 @@
 #include <Databases/DataLake/ICatalog.h>
 #include <Storages/MutationCommands.h>
 #include <Storages/AlterCommands.h>
+#include <Storages/PartitionCommands.h>
 #include <Storages/IStorage.h>
 #include <Common/Exception.h>
 #include <Storages/StorageFactory.h>
@@ -258,7 +259,18 @@ public:
         }
     }
 
+    virtual void checkAlterPartitionIsPossible(const PartitionCommands & /*commands*/ ) const
+    {
+        throw Exception(ErrorCodes::NOT_IMPLEMENTED, "Alter partition commands are not supported by storage {}", getEngineName());
+    }
+
     virtual void alter(ObjectStoragePtr /*object_storage*/, const AlterCommands & /*params*/, ContextPtr /*context*/) {}
+
+    virtual Pipe
+    alterPartition(const PartitionCommands & /* commands */, ContextPtr /* context */)
+    {
+        return {};
+    }
 
     virtual const DataLakeStorageSettings & getDataLakeSettings() const
     {

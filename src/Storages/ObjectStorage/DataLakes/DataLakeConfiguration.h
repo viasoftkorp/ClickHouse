@@ -165,11 +165,22 @@ public:
         current_metadata->checkAlterIsPossible(commands);
     }
 
+    void checkAlterPartitionIsPossible(const PartitionCommands & commands ) const override
+    {
+        assertInitialized();
+        current_metadata->checkAlterPartitionIsPossible(commands);
+    }
+
+    Pipe alterPartition(const PartitionCommands & commands , ContextPtr context) override
+    {
+        assertInitialized();
+        current_metadata->alterPartition(commands, context);
+    }
+
     void alter(ObjectStoragePtr object_storage, const AlterCommands & params, ContextPtr context) override
     {
         lazyInitializeIfNeeded(object_storage, context);
         current_metadata->alter(params, context);
-
     }
 
     ObjectStoragePtr createObjectStorage(ContextPtr context, bool is_readonly, StorageObjectStorageConfiguration::CredentialsConfigurationCallback refresh_credentials_callback) override
