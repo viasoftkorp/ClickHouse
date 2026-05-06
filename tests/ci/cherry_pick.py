@@ -21,6 +21,9 @@ A plan:
 Cherry-pick stage:
     - From time to time the cherry-pick fails, if it was done manually. In the
     case we check if it's even needed, and mark the release as done somehow.
+
+The cross-repo synchronization is described in the KB article:
+https://github.com/ClickHouse/internal-knowledge-base/issues/452
 """
 
 import argparse
@@ -30,6 +33,8 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from subprocess import CalledProcessError
 from typing import Iterable, List, Optional
+
+from github.GithubException import GithubException
 
 from cache_utils import GitHubCache
 from ci_buddy import CIBuddy
@@ -43,7 +48,6 @@ from env_helper import (
 )
 from get_robot_token import get_best_robot_token
 from git_helper import GIT_PREFIX, git_runner, is_shallow, stash
-from github.GithubException import GithubException
 from github_helper import GitHub, PullRequest, PullRequests, Repository
 from pr_info import Labels
 from report import GITHUB_JOB_URL
@@ -664,9 +668,7 @@ class BackportPRs:
             if Labels.ROLLING_OUT in {label.name for label in release_pr.labels}
         ]
 
-    def _close_prs_for_rolling_out_branch(
-        self, pr: PullRequest, branch: str
-    ) -> None:
+    def _close_prs_for_rolling_out_branch(self, pr: PullRequest, branch: str) -> None:
         """
         Close any open cherry-pick or backport PRs that were previously created
         for a release branch that is now marked `rolling-out`.
@@ -715,8 +717,10 @@ class BackportPRs:
         pr_labels = [label.name for label in pr.labels]
 
         is_force_backport = Labels.MUST_BACKPORT_FORCE in pr_labels
-        is_general_backport = is_force_backport or Labels.MUST_BACKPORT in pr_labels or bool(
-            Labels.AUTO_BACKPORT & set(pr_labels)
+        is_general_backport = (
+            is_force_backport
+            or Labels.MUST_BACKPORT in pr_labels
+            or bool(Labels.AUTO_BACKPORT & set(pr_labels))
         )
         if is_general_backport:
             if is_force_backport:
@@ -728,8 +732,7 @@ class BackportPRs:
                     Labels.MUST_BACKPORT_FORCE,
                 )
                 branches = [
-                    ReleaseBranch(br, pr, self.repo)
-                    for br in self.release_branches
+                    ReleaseBranch(br, pr, self.repo) for br in self.release_branches
                 ]  # type: List[ReleaseBranch]
             else:
                 # For general backports (pr-must-backport / critical bugfix), skip
@@ -990,7 +993,17 @@ class CherryPickPRs:
             )
             return
 
-        original_pr.remove_from_labels(Labels.PR_BACKPORTS_CREATED)
+        try:
+            original_pr.remove_from_labels(Labels.PR_BACKPORTS_CREATED)
+        except GithubException as e:
+            if e.status == 404:
+                logging.info(
+                    "Label %s is already removed from PR #%s",
+                    Labels.PR_BACKPORTS_CREATED,
+                    original_pr.number,
+                )
+            else:
+                raise
         pr.create_issue_comment(comment_body)
         logging.info(
             "Removed label %s from PR #%s and posted comment to cherry-pick PR #%s",
