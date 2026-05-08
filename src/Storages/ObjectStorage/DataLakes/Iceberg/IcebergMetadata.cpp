@@ -652,22 +652,6 @@ void IcebergMetadata::alter(const AlterCommands & params, ContextPtr context)
     Iceberg::alter(params, context, object_storage, data_lake_settings, persistent_components, write_format);
 }
 
-Pipe IcebergMetadata::alterPartition(const PartitionCommands & commands, ContextPtr context)
-{
-    if (!context->getSettingsRef()[Setting::allow_insert_into_iceberg].value)
-    {
-        throw Exception(
-            ErrorCodes::SUPPORT_IS_DISABLED,
-            "Alter iceberg is experimental. "
-            "To allow its usage, enable setting allow_insert_into_iceberg");
-    }
-
-    Iceberg::alterPartition(commands, context, object_storage, data_lake_settings, persistent_components, write_format);
-
-    return {};
-}
-
-
 Pipe IcebergMetadata::executeCommand(
     const String & command_name,
     const ASTPtr & args,

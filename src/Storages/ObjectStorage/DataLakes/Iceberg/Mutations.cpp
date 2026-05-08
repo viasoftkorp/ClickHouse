@@ -13,6 +13,7 @@
 #include <IO/CompressionMethod.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/DatabaseCatalog.h>
+#include <Parsers/ASTPartition.h>
 #include <Processors/Chunk.h>
 #include <Processors/Executors/PullingPipelineExecutor.h>
 #include <QueryPipeline/QueryPipelineBuilder.h>
@@ -20,6 +21,8 @@
 #include <Storages/MutationCommands.h>
 #include <Storages/StorageInMemoryMetadata.h>
 #include <Storages/ObjectStorage/DataLakes/Iceberg/Constant.h>
+#include <Storages/ObjectStorage/DataLakes/Iceberg/IcebergIterator.h>
+#include <Storages/ObjectStorage/DataLakes/Iceberg/IcebergMetadata.h>
 #include <Storages/ObjectStorage/DataLakes/Iceberg/IcebergWrites.h>
 #include <Storages/ObjectStorage/DataLakes/Iceberg/MetadataGenerator.h>
 #include <Storages/ObjectStorage/DataLakes/Iceberg/Mutations.h>
@@ -29,6 +32,7 @@
 #include <Storages/ObjectStorage/DataLakes/Iceberg/Utils.h>
 #include <Storages/ObjectStorage/StorageObjectStorage.h>
 #include <Storages/ObjectStorage/StorageObjectStorageSource.h>
+#include <Storages/PartitionCommands.h>
 #include <Storages/VirtualColumnUtils.h>
 #include <Poco/JSON/Array.h>
 #include <Poco/JSON/Object.h>
@@ -42,6 +46,7 @@ namespace DB::ErrorCodes
 extern const int BAD_ARGUMENTS;
 extern const int LOGICAL_ERROR;
 extern const int LIMIT_EXCEEDED;
+extern const int SUPPORT_IS_DISABLED;
 }
 
 namespace DB::DataLakeStorageSetting
@@ -52,6 +57,11 @@ extern const DataLakeStorageSettingsBool iceberg_use_version_hint;
 namespace DB::FailPoints
 {
 extern const char iceberg_writes_cleanup[];
+}
+
+namespace DB::Setting
+{
+extern const SettingsBool allow_insert_into_iceberg;
 }
 
 namespace DB::Iceberg
@@ -797,18 +807,79 @@ void alter(
     persistent_table_components.invalidateMetadataCache();
 }
 
-void alterPartition(
-    const PartitionCommands & params,
-    ContextPtr context,
-    ObjectStoragePtr object_storage,
-    const DataLakeStorageSettings & data_lake_settings,
-    const PersistentTableComponents & persistent_table_components,
-    const String & write_format)
-{
+#endif
 
 }
 
+namespace DB
+{
 
+Pipe IcebergMetadata::alterPartition(const PartitionCommands & commands, ContextPtr context)
+{
+    if (!context->getSettingsRef()[Setting::allow_insert_into_iceberg].value)
+    {
+        throw Exception(
+            ErrorCodes::SUPPORT_IS_DISABLED,
+            "Alter iceberg is experimental. "
+            "To allow its usage, enable setting allow_insert_into_iceberg");
+    }
+#if USE_AVRO
+    if (commands.size() != 1)
+        throw Exception(ErrorCodes::BAD_ARGUMENTS, "Params with size 1 is not supported");
+
+    const auto & command = commands.at(0);
+
+    switch (command.type)
+    {
+        case PartitionCommand::Type::DROP_PARTITION: {
+            if (command.part || command.detach)
+                throw Exception(ErrorCodes::NOT_IMPLEMENTED, "{} is not supported of Iceberg", command.typeToString());
+
+            alterPartitionDropImpl(command, context);
+            break;
+        }
+        default:
+            throw Exception(ErrorCodes::NOT_IMPLEMENTED, "{} is not supported of Iceberg", command.typeToString());
+    }
+#else
+    throw Exception(ErrorCodes::NOT_IMPLEMENTED, "Alter partition is not supported of Iceberg", command.typeToString());
 #endif
+    return {};
+}
+
+void IcebergMetadata::alterPartitionDropImpl(const PartitionCommand & command, ContextPtr context)
+{
+#if USE_AVRO
+    const auto & partition_ast = command.partition->as<ASTPartition>();
+
+    if (partition_ast->all)
+        throw Exception(ErrorCodes::NOT_IMPLEMENTED, "{} ALL is not supported of Iceberg", command.typeToString());
+
+    if (partition_ast->id)
+        throw Exception(ErrorCodes::NOT_IMPLEMENTED, "{} ID is not supported of Iceberg", command.typeToString());
+
+    if (!partition_ast->value)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "{} doesn't have partittion value", command.typeToString());
+
+    const auto * value_ast = partition_ast->value->as<ASTLiteral>();
+
+    if (!value_ast)
+        throw Exception(
+            ErrorCodes::NOT_IMPLEMENTED,
+            "{} support only literals for Iceberg (got {})",
+            command.typeToString(),
+            value_ast->formatForLogging());
+
+    // auto [snapshot, table_state] = getRelevantState(context, /*force_fetch_latest_metadata=*/true);
+    //
+    // Iceberg::SingleThreadIcebergKeysIterator manifests_iterator(object_storage, context, snapshot->man
+    //
+    // for (const auto & manifest : snapshot->manifest_list_entries)
+    // {
+    //     auto manifest_parsed = Iceberg::getManifestFile(
+    //         object_storage, persistent_components, context, log, manifest.manifest_file_path, manifest.manifest_file_byte_size);
+    // }
+#endif
+}
 
 }

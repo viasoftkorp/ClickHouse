@@ -178,6 +178,8 @@ private:
     KeyDescription getSortingKey(ContextPtr local_context, Iceberg::TableStateSnapshot actual_table_state_snapshot) const;
 
     void backgroundMetadataPrefetcherThread();
+
+    void alterPartitionDropImpl(const PartitionCommand & command, ContextPtr context);
 };
 }
 
