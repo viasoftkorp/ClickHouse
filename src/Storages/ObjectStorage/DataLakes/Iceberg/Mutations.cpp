@@ -24,6 +24,7 @@
 #include <Storages/ObjectStorage/DataLakes/Iceberg/IcebergIterator.h>
 #include <Storages/ObjectStorage/DataLakes/Iceberg/IcebergMetadata.h>
 #include <Storages/ObjectStorage/DataLakes/Iceberg/IcebergWrites.h>
+#include <Storages/ObjectStorage/DataLakes/Iceberg/ManifestFile.h>
 #include <Storages/ObjectStorage/DataLakes/Iceberg/MetadataGenerator.h>
 #include <Storages/ObjectStorage/DataLakes/Iceberg/Mutations.h>
 #include <Storages/ObjectStorage/DataLakes/Iceberg/PersistentTableComponents.h>
@@ -850,6 +851,22 @@ Pipe IcebergMetadata::alterPartition(const PartitionCommands & commands, Context
 void IcebergMetadata::alterPartitionDropImpl(const PartitionCommand & command, ContextPtr context)
 {
 #if USE_AVRO
+    /// NOTE: In case we remove almost all data files from data manifest files we could merge rest data files records in one manifest
+    ///
+    /// NOTE: How the files will be delete actually?! We just remove records about them in snapsthot, probably snapshot expiration should take care of them so
+    /// there is no differece with DROP/DETACH ?! (ATTACH might fail in that case)
+    ///
+    /// NOTE: We should prune data files by using PartitionPruner probably
+    ///
+    /// 1. Look up all the manifests in the snapshot
+    /// 2. We should check partition_key in every data manifest file
+    ///  2.1 If all data files has the same partition_key which should be dropped we just remove this manifest data file from snapshot's manifest list
+    ///  2.2 Else remove only matched data files from the manifest, we will write a new manifest file which will replace the one we lookup
+    /// 3. Create a new snapshot, and try to commit, if failed we have options:
+    ///  - Repeat on a new snapshot, get a new snapshot and repeat the procedure, but we might ended up with removing
+    ///  - Better on, remove only records about data files which were present in the initial snapshot. Some compaction might happen, and our data files can then reside
+    ///    in different manifest files, so we need to track them on data files level
+    ///  - Fail the operation, not sure if there is an option, maybe in some cases, but we shouldn't fail if e.g. one concurrent insert on another partition has landed while we were preparing
     const auto & partition_ast = command.partition->as<ASTPartition>();
 
     if (partition_ast->all)
@@ -870,15 +887,25 @@ void IcebergMetadata::alterPartitionDropImpl(const PartitionCommand & command, C
             command.typeToString(),
             value_ast->formatForLogging());
 
-    // auto [snapshot, table_state] = getRelevantState(context, /*force_fetch_latest_metadata=*/true);
-    //
-    // Iceberg::SingleThreadIcebergKeysIterator manifests_iterator(object_storage, context, snapshot->man
-    //
-    // for (const auto & manifest : snapshot->manifest_list_entries)
-    // {
-    //     auto manifest_parsed = Iceberg::getManifestFile(
-    //         object_storage, persistent_components, context, log, manifest.manifest_file_path, manifest.manifest_file_byte_size);
-    // }
+    auto [snapshot, table_state] = getRelevantState(context, /*force_fetch_latest_metadata=*/true);
+
+    Iceberg::SingleThreadIcebergKeysIterator manifests_iterator(
+        object_storage,
+        context,
+        Iceberg::ManifestFileContentType::DATA,
+        /*filter_dag_=*/nullptr,
+        std::make_shared<Iceberg::TableStateSnapshot>(table_state), //FIXME
+        snapshot,
+        persistent_components);
+
+    while (auto data_file_manifest_opt = manifests_iterator.next())
+    {
+        const auto & data_file_manifest = *data_file_manifest_opt;
+        const auto & parsed_entry       = data_file_manifest->parsed_entry;
+
+        if (!parsed_entry)
+            throw Exception(ErrorCodes::LOGICAL_ERROR, "Manifest file wasn't parsed (sequenece_number: {})", data_file_manifest->sequence_number);
+    }
 #endif
 }
 
