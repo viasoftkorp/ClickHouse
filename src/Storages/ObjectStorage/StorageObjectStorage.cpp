@@ -822,9 +822,9 @@ void StorageObjectStorage::alter(const AlterCommands & params, ContextPtr contex
     setInMemoryMetadata(new_metadata);
 }
 Pipe StorageObjectStorage::alterPartition(
-    const StorageMetadataPtr & metadata_snapshot, const PartitionCommands & commands, ContextPtr context)
+    const StorageMetadataPtr & /*metadata_snapshot*/, const PartitionCommands & commands, ContextPtr context)
 {
-    return configuration->alterPartition(metadata_snapshot, commands, std::move(context));
+    return configuration->alterPartition(commands, std::move(context));
 }
 
 

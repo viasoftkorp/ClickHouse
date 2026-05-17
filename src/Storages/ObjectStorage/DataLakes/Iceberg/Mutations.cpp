@@ -1,13 +1,21 @@
 #include <Columns/ColumnLowCardinality.h>
 #include <Columns/ColumnNullable.h>
 #include <Columns/ColumnString.h>
+#include <Common/FieldAccurateComparison.h>
 #include <Core/ColumnsWithTypeAndName.h>
 #include <Core/Settings.h>
+#include <DataTypes/DataTypeDate.h>
+#include <DataTypes/DataTypeDateTime64.h>
 #include <DataTypes/DataTypeLowCardinality.h>
 #include <DataTypes/DataTypeNullable.h>
 #include <DataTypes/DataTypeString.h>
+#include <DataTypes/DataTypesDecimal.h>
 #include <DataTypes/DataTypesNumber.h>
 #include <Databases/DataLake/Common.h>
+#include <Parsers/ASTFunction.h>
+#include <Parsers/ASTLiteral.h>
+#include <Storages/ObjectStorage/DataLakes/Iceberg/IcebergMetadataFilesCache.h>
+#include <Storages/ObjectStorage/DataLakes/Iceberg/ManifestFileIterator.h>
 #include <Disks/DiskObjectStorage/ObjectStorages/StoredObject.h>
 #include <Formats/FormatFactory.h>
 #include <IO/CompressionMethod.h>
@@ -40,6 +48,7 @@
 #include <Common/Exception.h>
 #include <Common/FailPoint.h>
 #include <limits>
+#include <set>
 #include <unordered_set>
 
 namespace DB::ErrorCodes
@@ -47,6 +56,7 @@ namespace DB::ErrorCodes
 extern const int BAD_ARGUMENTS;
 extern const int LOGICAL_ERROR;
 extern const int LIMIT_EXCEEDED;
+extern const int NOT_IMPLEMENTED;
 extern const int SUPPORT_IS_DISABLED;
 }
 
@@ -848,64 +858,546 @@ Pipe IcebergMetadata::alterPartition(const PartitionCommands & commands, Context
     return {};
 }
 
+#if USE_AVRO
+namespace
+{
+
+/// Translate the natural type of a Field stored in a parsed manifest's partition tuple
+/// into a ClickHouse DataType, used to build the Avro schema of the rewritten manifest
+/// file. The mapping mirrors what the Avro reader produced when parsing the original
+/// manifest, so the encoded values round-trip safely.
+DataTypePtr inferPartitionType(const Field & f)
+{
+    switch (f.getType())
+    {
+        case Field::Types::Int64:
+        case Field::Types::UInt64:
+            return std::make_shared<DataTypeInt64>();
+        case Field::Types::String:
+            return std::make_shared<DataTypeString>();
+        case Field::Types::Float64:
+            return std::make_shared<DataTypeFloat64>();
+        case Field::Types::Decimal32:
+            return std::make_shared<DataTypeDecimal<Decimal32>>(9, 0);
+        case Field::Types::Decimal64:
+            return std::make_shared<DataTypeDecimal<Decimal64>>(18, 0);
+        case Field::Types::Null:
+            return std::make_shared<DataTypeNullable>(std::make_shared<DataTypeString>());
+        default:
+            throw Exception(
+                ErrorCodes::NOT_IMPLEMENTED,
+                "Unsupported partition value type {} when rewriting manifest for DROP PARTITION",
+                f.getType());
+    }
+}
+
+bool partitionEquals(const DB::Row & lhs, const DB::Row & rhs)
+{
+    if (lhs.size() != rhs.size())
+        return false;
+    for (size_t i = 0; i < lhs.size(); ++i)
+        if (!accurateEquals(lhs[i], rhs[i]))
+            return false;
+    return true;
+}
+
+/// Parse the partition value from an ASTPartition into a tuple of Field values matching
+/// the partition spec's arity. Accepts scalar literal (arity must be 1), tuple literal,
+/// or a `tuple(...)` function call of literals. User-supplied values are taken as the
+/// already-transformed partition values (e.g. integer day-since-epoch for `day(ts)`).
+DB::Row parsePartitionTuple(const IAST * value_ast, size_t arity)
+{
+    DB::Row out;
+    out.reserve(arity);
+
+    if (const auto * lit = value_ast->as<ASTLiteral>())
+    {
+        if (lit->value.getType() == Field::Types::Tuple)
+        {
+            const auto & t = lit->value.safeGet<Tuple>();
+            if (t.size() != arity)
+                throw Exception(
+                    ErrorCodes::BAD_ARGUMENTS,
+                    "DROP PARTITION value has {} fields but partition spec has {}", t.size(), arity);
+            for (const auto & f : t)
+                out.push_back(f);
+            return out;
+        }
+        if (arity != 1)
+            throw Exception(
+                ErrorCodes::BAD_ARGUMENTS,
+                "DROP PARTITION expects a tuple of {} values for this table, got a scalar", arity);
+        out.push_back(lit->value);
+        return out;
+    }
+
+    if (const auto * fn = value_ast->as<ASTFunction>(); fn && fn->name == "tuple")
+    {
+        const auto & args = fn->arguments ? fn->arguments->children : ASTs{};
+        if (args.size() != arity)
+            throw Exception(
+                ErrorCodes::BAD_ARGUMENTS,
+                "DROP PARTITION value has {} fields but partition spec has {}", args.size(), arity);
+        for (const auto & arg : args)
+        {
+            const auto * arg_lit = arg->as<ASTLiteral>();
+            if (!arg_lit)
+                throw Exception(
+                    ErrorCodes::NOT_IMPLEMENTED,
+                    "DROP PARTITION supports only literal partition values for Iceberg");
+            out.push_back(arg_lit->value);
+        }
+        return out;
+    }
+
+    throw Exception(
+        ErrorCodes::NOT_IMPLEMENTED,
+        "DROP PARTITION supports only literal partition values for Iceberg");
+}
+
+}
+#endif
+
 void IcebergMetadata::alterPartitionDropImpl(const PartitionCommand & command, ContextPtr context)
 {
 #if USE_AVRO
-    /// NOTE: In case we remove almost all data files from data manifest files we could merge rest data files records in one manifest
-    ///
-    /// NOTE: How the files will be delete actually?! We just remove records about them in snapsthot, probably snapshot expiration should take care of them so
-    /// there is no differece with DROP/DETACH ?! (ATTACH might fail in that case)
-    ///
-    /// NOTE: We should prune data files by using PartitionPruner probably
-    ///
-    /// 1. Look up all the manifests in the snapshot
-    /// 2. We should check partition_key in every data manifest file
-    ///  2.1 If all data files has the same partition_key which should be dropped we just remove this manifest data file from snapshot's manifest list
-    ///  2.2 Else remove only matched data files from the manifest, we will write a new manifest file which will replace the one we lookup
-    /// 3. Create a new snapshot, and try to commit, if failed we have options:
-    ///  - Repeat on a new snapshot, get a new snapshot and repeat the procedure, but we might ended up with removing
-    ///  - Better on, remove only records about data files which were present in the initial snapshot. Some compaction might happen, and our data files can then reside
-    ///    in different manifest files, so we need to track them on data files level
-    ///  - Fail the operation, not sure if there is an option, maybe in some cases, but we shouldn't fail if e.g. one concurrent insert on another partition has landed while we were preparing
+    /// Algorithm (matches the design notes that were on this function originally):
+    ///   1. Load latest metadata & current snapshot.
+    ///   2. For each manifest in the snapshot, classify entries as either matching the
+    ///      requested partition (to remove) or surviving.
+    ///   3. Rewrite manifests:
+    ///        - all-match  manifest  → drop it from the new manifest list
+    ///        - partial    manifest  → write a replacement manifest with surviving
+    ///                                 entries re-emitted with status=EXISTING (their
+    ///                                 original snapshot_id and sequence_number are
+    ///                                 preserved per Iceberg v2 spec)
+    ///        - no-match   manifest  → carry over verbatim from the parent's list
+    ///   4. Build a new "delete" snapshot summarising removed counts, then write a new
+    ///      metadata.json (CAS) committing the result.
+    ///   5. On commit conflict (concurrent writer), re-fetch the latest snapshot and
+    ///      retry. Across retries we keep targeting the same set of data-file paths
+    ///      identified on the first pass — compaction may have moved them between
+    ///      manifests, but the *paths* are stable; this means a concurrent insert
+    ///      into a different partition cannot make us fail, and a concurrent insert
+    ///      into the same partition lands AFTER our drop, leaving its rows intact.
     const auto & partition_ast = command.partition->as<ASTPartition>();
 
     if (partition_ast->all)
-        throw Exception(ErrorCodes::NOT_IMPLEMENTED, "{} ALL is not supported of Iceberg", command.typeToString());
+        throw Exception(ErrorCodes::NOT_IMPLEMENTED, "{} ALL is not supported for Iceberg", command.typeToString());
 
     if (partition_ast->id)
-        throw Exception(ErrorCodes::NOT_IMPLEMENTED, "{} ID is not supported of Iceberg", command.typeToString());
+        throw Exception(ErrorCodes::NOT_IMPLEMENTED, "{} ID is not supported for Iceberg", command.typeToString());
 
     if (!partition_ast->value)
-        throw Exception(ErrorCodes::LOGICAL_ERROR, "{} doesn't have partittion value", command.typeToString());
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "{} doesn't have partition value", command.typeToString());
 
-    const auto * value_ast = partition_ast->value->as<ASTLiteral>();
+    auto drop_log = getLogger("IcebergPartitionDrop");
 
-    if (!value_ast)
-        throw Exception(
-            ErrorCodes::NOT_IMPLEMENTED,
-            "{} support only literals for Iceberg (got {})",
-            command.typeToString(),
-            value_ast->formatForLogging());
+    /// Set of storage-resolved data-file paths to drop, locked in on the first attempt.
+    std::unordered_set<String> data_paths_to_remove;
+    std::unordered_set<String> position_delete_paths_to_remove;
+    bool target_set_initialized = false;
 
-    auto [snapshot, table_state] = getRelevantState(context, /*force_fetch_latest_metadata=*/true);
-
-    Iceberg::SingleThreadIcebergKeysIterator manifests_iterator(
-        object_storage,
-        context,
-        Iceberg::ManifestFileContentType::DATA,
-        /*filter_dag_=*/nullptr,
-        std::make_shared<Iceberg::TableStateSnapshot>(table_state), //FIXME
-        snapshot,
-        persistent_components);
-
-    while (auto data_file_manifest_opt = manifests_iterator.next())
+    int attempts = 0;
+    while (attempts++ < Iceberg::MAX_TRANSACTION_RETRIES)
     {
-        const auto & data_file_manifest = *data_file_manifest_opt;
-        const auto & parsed_entry       = data_file_manifest->parsed_entry;
+        auto [data_snapshot, table_state] = getRelevantState(context, /*force_fetch_latest_metadata=*/true);
+        if (!data_snapshot)
+        {
+            LOG_DEBUG(drop_log, "Table has no snapshot, nothing to drop");
+            return;
+        }
 
-        if (!parsed_entry)
-            throw Exception(ErrorCodes::LOGICAL_ERROR, "Manifest file wasn't parsed (sequenece_number: {})", data_file_manifest->sequence_number);
+        auto metadata_object = Iceberg::getMetadataJSONObject(
+            table_state.metadata_file_path,
+            object_storage,
+            persistent_components.metadata_cache,
+            context,
+            log,
+            persistent_components.metadata_compression_method,
+            persistent_components.table_uuid);
+
+        if (metadata_object->getValue<Int32>(Iceberg::f_format_version) < 2)
+            throw Exception(ErrorCodes::BAD_ARGUMENTS, "DROP PARTITION is supported only for Iceberg format-version 2");
+
+        /// Locate the current default partition spec.
+        auto partition_spec_id = metadata_object->getValue<Int64>(Iceberg::f_default_spec_id);
+        Poco::JSON::Object::Ptr partition_spec;
+        {
+            auto specs = metadata_object->getArray(Iceberg::f_partition_specs);
+            for (size_t i = 0; i < specs->size(); ++i)
+            {
+                auto p = specs->getObject(static_cast<UInt32>(i));
+                if (p->getValue<Int64>(Iceberg::f_spec_id) == partition_spec_id)
+                {
+                    partition_spec = p;
+                    break;
+                }
+            }
+        }
+        if (!partition_spec)
+            throw Exception(ErrorCodes::LOGICAL_ERROR, "Default partition spec {} not found in metadata", partition_spec_id);
+
+        auto partition_fields = partition_spec->getArray(Iceberg::f_fields);
+        const size_t partition_arity = partition_fields->size();
+        if (partition_arity == 0)
+            throw Exception(ErrorCodes::BAD_ARGUMENTS, "DROP PARTITION is not supported on unpartitioned Iceberg tables");
+
+        std::vector<String> partition_columns;
+        partition_columns.reserve(partition_arity);
+        for (size_t i = 0; i < partition_arity; ++i)
+            partition_columns.push_back(partition_fields->getObject(static_cast<UInt32>(i))->getValue<String>(Iceberg::f_partition_name));
+
+        const DB::Row target_partition = parsePartitionTuple(partition_ast->value, partition_arity);
+
+        /// Iterate manifests for the current snapshot and group entries per manifest so
+        /// we can classify each manifest as drop / rewrite / keep.
+        struct ManifestPlan
+        {
+            Iceberg::IcebergPathFromMetadata path;
+            Int64 byte_size = 0;
+            Iceberg::ManifestFileContentType manifest_content_type = Iceberg::ManifestFileContentType::DATA;
+            std::vector<Iceberg::ProcessedManifestFileEntryPtr> survivors;   // status != DELETED, not matched
+            std::vector<Iceberg::ProcessedManifestFileEntryPtr> matched;     // to be removed
+        };
+
+        std::vector<ManifestPlan> manifest_plans;
+        manifest_plans.reserve(data_snapshot->manifest_list_entries.size());
+
+        Int32 schema_id = data_snapshot->schema_id_on_snapshot_commit;
+
+        for (const auto & manifest_key : data_snapshot->manifest_list_entries)
+        {
+            ManifestPlan plan;
+            plan.path = manifest_key.manifest_file_path;
+            plan.byte_size = static_cast<Int64>(manifest_key.manifest_file_byte_size);
+            plan.manifest_content_type = manifest_key.content_type;
+
+            auto handle = Iceberg::getManifestFileEntriesHandle(
+                object_storage, persistent_components, context, log, manifest_key, schema_id);
+
+            auto classify = [&](const std::vector<Iceberg::ProcessedManifestFileEntryPtr> & entries,
+                                std::unordered_set<String> * tracking_set,
+                                Iceberg::FileContentType content_type)
+            {
+                for (const auto & entry : entries)
+                {
+                    const auto & parsed = entry->parsed_entry;
+                    if (!parsed)
+                        throw Exception(ErrorCodes::LOGICAL_ERROR, "Manifest file entry is not parsed");
+
+                    bool matches = false;
+                    if (target_set_initialized)
+                    {
+                        const String storage_path = persistent_components.path_resolver.resolve(parsed->file_path_key);
+                        const auto & target = (content_type == Iceberg::FileContentType::DATA)
+                            ? data_paths_to_remove
+                            : position_delete_paths_to_remove;
+                        matches = target.contains(storage_path);
+                    }
+                    else
+                    {
+                        matches = partitionEquals(parsed->partition_key_value, target_partition);
+                        if (matches && tracking_set)
+                        {
+                            tracking_set->insert(persistent_components.path_resolver.resolve(parsed->file_path_key));
+                        }
+                    }
+
+                    if (matches)
+                        plan.matched.push_back(entry);
+                    else
+                        plan.survivors.push_back(entry);
+                }
+            };
+
+            classify(handle.getFilesWithoutDeleted(Iceberg::FileContentType::DATA),
+                     target_set_initialized ? nullptr : &data_paths_to_remove,
+                     Iceberg::FileContentType::DATA);
+            classify(handle.getFilesWithoutDeleted(Iceberg::FileContentType::POSITION_DELETE),
+                     target_set_initialized ? nullptr : &position_delete_paths_to_remove,
+                     Iceberg::FileContentType::POSITION_DELETE);
+
+            manifest_plans.push_back(std::move(plan));
+        }
+
+        target_set_initialized = true;
+
+        if (data_paths_to_remove.empty() && position_delete_paths_to_remove.empty())
+        {
+            LOG_INFO(log, "No data files match the requested partition; DROP PARTITION is a no-op");
+            return;
+        }
+
+        /// Tally removed-file statistics and split manifests into drop / rewrite / keep.
+        Int64 removed_data_files = 0;
+        Int64 removed_records = 0;
+        Int64 removed_files_size = 0;
+        Int64 removed_position_delete_files = 0;
+        Int64 removed_position_deletes = 0;
+        std::set<DB::Row> changed_partitions;
+
+        std::unordered_set<String> skip_manifest_paths;
+        struct RewriteOutput
+        {
+            Iceberg::IcebergPathFromMetadata new_manifest_path;
+            Int64 manifest_length = 0;
+            Int32 existing_files_count = 0;
+            Int32 existing_rows_count = 0;
+            /// Smallest sequence number among the surviving entries; goes into the
+            /// manifest list as `min_sequence_number`. The manifest list's own
+            /// `added_snapshot_id` / `sequence_number` are populated by the writer
+            /// from the new (DROP) snapshot — the rewritten manifest *file* is new.
+            Int64 min_sequence_number = 0;
+            Iceberg::FileContentType content_type = Iceberg::FileContentType::DATA;
+        };
+        std::vector<RewriteOutput> rewrites;
+
+        FileNamesGenerator filename_generator(
+            persistent_components.path_resolver.getTableLocation(),
+            false,
+            persistent_components.metadata_compression_method,
+            write_format);
+        filename_generator.setVersion(table_state.metadata_version + 1);
+        filename_generator.setCompressionMethod(persistent_components.metadata_compression_method);
+
+        /// Derive partition types from the first matched entry's tuple. This is sufficient
+        /// for re-emitting Avro records: the values being written are exactly the Fields
+        /// we already parsed out of the original manifests, so type round-trip is exact.
+        std::vector<DataTypePtr> partition_types;
+        partition_types.reserve(partition_arity);
+        for (size_t i = 0; i < partition_arity; ++i)
+        {
+            DataTypePtr t;
+            for (const auto & plan : manifest_plans)
+            {
+                auto pick = [&](const std::vector<Iceberg::ProcessedManifestFileEntryPtr> & v) -> DataTypePtr
+                {
+                    for (const auto & e : v)
+                        if (i < e->parsed_entry->partition_key_value.size())
+                            return inferPartitionType(e->parsed_entry->partition_key_value[i]);
+                    return nullptr;
+                };
+                t = pick(plan.matched);
+                if (!t) t = pick(plan.survivors);
+                if (t) break;
+            }
+            if (!t)
+                t = inferPartitionType(target_partition[i]);
+            partition_types.push_back(t);
+        }
+
+        /// Cleanup of any new manifest files we wrote, used if commit fails or throws.
+        std::vector<String> wrote_for_cleanup;
+        auto cleanup = [&]()
+        {
+            for (const auto & p : wrote_for_cleanup)
+            {
+                try { object_storage->removeObjectIfExists(StoredObject(p)); }
+                catch (...) { tryLogCurrentException(log, "Failed to clean up partially-written manifest"); }
+            }
+        };
+
+        try
+        {
+            for (auto & plan : manifest_plans)
+            {
+                if (plan.matched.empty())
+                    continue;
+
+                for (const auto & m : plan.matched)
+                {
+                    const auto & p = *m->parsed_entry;
+                    if (p.content_type == Iceberg::FileContentType::DATA)
+                    {
+                        ++removed_data_files;
+                        removed_records += p.record_count;
+                        removed_files_size += p.file_size_in_bytes;
+                    }
+                    else if (p.content_type == Iceberg::FileContentType::POSITION_DELETE)
+                    {
+                        ++removed_position_delete_files;
+                        removed_position_deletes += p.record_count;
+                    }
+                    changed_partitions.insert(p.partition_key_value);
+                }
+
+                if (plan.survivors.empty())
+                {
+                    /// All entries match — drop the whole manifest from the new list.
+                    skip_manifest_paths.insert(plan.path.serialize());
+                    continue;
+                }
+
+                /// Partial match — write a replacement manifest with surviving entries
+                /// as status=EXISTING. Skip if there is mixed content_type (would need
+                /// two replacement manifests). In practice data and position-delete
+                /// manifests are separate per spec, so survivors are homogeneous here.
+                Iceberg::FileContentType replacement_content_type = plan.survivors.front()->parsed_entry->content_type;
+                for (const auto & s : plan.survivors)
+                {
+                    if (s->parsed_entry->content_type != replacement_content_type)
+                        throw Exception(
+                            ErrorCodes::NOT_IMPLEMENTED,
+                            "Manifest {} mixes content types; rewriting it is not supported",
+                            plan.path.serialize());
+                }
+
+                auto new_manifest_path = filename_generator.generateManifestEntryName();
+                const String new_storage_path = persistent_components.path_resolver.resolve(new_manifest_path);
+                wrote_for_cleanup.push_back(new_storage_path);
+
+                auto buf = object_storage->writeObject(
+                    StoredObject(new_storage_path),
+                    WriteMode::Rewrite,
+                    std::nullopt,
+                    DBMS_DEFAULT_BUFFER_SIZE,
+                    context->getWriteSettings());
+
+                generateExistingManifestFile(
+                    metadata_object,
+                    partition_spec,
+                    partition_spec_id,
+                    partition_columns,
+                    partition_types,
+                    plan.survivors,
+                    *buf);
+                buf->finalize();
+
+                Int64 length = buf->count();
+                if (length == 0)
+                    length = object_storage->getObjectMetadata(new_storage_path, /*with_tags=*/false).size_bytes;
+
+                /// Mark the original manifest as removed from the new list.
+                skip_manifest_paths.insert(persistent_components.path_resolver.resolve(plan.path));
+
+                RewriteOutput out;
+                out.new_manifest_path = new_manifest_path;
+                out.manifest_length = length;
+                out.existing_files_count = static_cast<Int32>(plan.survivors.size());
+                Int64 row_total = 0;
+                for (const auto & s : plan.survivors)
+                    row_total += s->parsed_entry->record_count;
+                out.existing_rows_count = static_cast<Int32>(row_total);
+                /// Smallest entry sequence number — describes the contents, not the
+                /// new manifest file (which is added by the current DROP snapshot).
+                Int64 min_entry_seq = std::numeric_limits<Int64>::max();
+                for (const auto & s : plan.survivors)
+                {
+                    Int64 seq = s->parsed_entry->parsed_sequence_number.value_or(s->sequence_number);
+                    min_entry_seq = std::min(min_entry_seq, seq);
+                }
+                if (min_entry_seq == std::numeric_limits<Int64>::max())
+                    min_entry_seq = 0;
+                out.min_sequence_number = min_entry_seq;
+                out.content_type = replacement_content_type;
+                rewrites.push_back(out);
+            }
+
+            /// Build the new snapshot.
+            MetadataGenerator metadata_generator(metadata_object);
+            auto metadata_info = filename_generator.generateMetadataPathWithInfo();
+            Int64 parent_snapshot_id = -1;
+            if (metadata_object->has(Iceberg::f_current_snapshot_id))
+                parent_snapshot_id = metadata_object->getValue<Int64>(Iceberg::f_current_snapshot_id);
+
+            auto new_snapshot_result = metadata_generator.generateNextMetadataForDelete(
+                filename_generator,
+                metadata_info.path,
+                parent_snapshot_id,
+                removed_data_files,
+                removed_records,
+                removed_files_size,
+                removed_position_delete_files,
+                removed_position_deletes,
+                static_cast<Int64>(changed_partitions.size()));
+
+            const String storage_manifest_list_path = persistent_components.path_resolver.resolve(new_snapshot_result.manifest_list_path);
+            wrote_for_cleanup.push_back(storage_manifest_list_path);
+
+            /// Assemble manifest list entries for the rewritten survivor manifests.
+            std::vector<ManifestListEntryForDelete> new_entries;
+            new_entries.reserve(rewrites.size());
+            for (const auto & r : rewrites)
+            {
+                ManifestListEntryForDelete e;
+                e.manifest_path = r.new_manifest_path;
+                e.manifest_length = r.manifest_length;
+                e.min_sequence_number = r.min_sequence_number;
+                e.added_files_count = 0;
+                e.existing_files_count = r.existing_files_count;
+                e.deleted_files_count = 0;
+                e.added_rows_count = 0;
+                e.existing_rows_count = r.existing_rows_count;
+                e.deleted_rows_count = 0;
+                e.content_type = r.content_type;
+                new_entries.push_back(e);
+            }
+
+            {
+                auto buf = object_storage->writeObject(
+                    StoredObject(storage_manifest_list_path),
+                    WriteMode::Rewrite,
+                    std::nullopt,
+                    DBMS_DEFAULT_BUFFER_SIZE,
+                    context->getWriteSettings());
+
+                generateManifestListForDelete(
+                    persistent_components.path_resolver,
+                    metadata_object,
+                    object_storage,
+                    context,
+                    new_snapshot_result.snapshot,
+                    new_entries,
+                    skip_manifest_paths,
+                    *buf);
+                buf->finalize();
+            }
+
+            /// Commit the new metadata.json via the version-hint / CAS path.
+            std::ostringstream oss; // STYLE_CHECK_ALLOW_STD_STRING_STREAM
+            Poco::JSON::Stringifier::stringify(metadata_object, oss, 4);
+            std::string json_representation = removeEscapedSlashes(oss.str());
+
+            fiu_do_on(FailPoints::iceberg_writes_cleanup,
+            {
+                throw Exception(ErrorCodes::BAD_ARGUMENTS, "Failpoint for cleanup enabled");
+            });
+
+            auto hint_path = filename_generator.generateVersionHint();
+            const bool committed = writeMetadataFileAndVersionHint(
+                persistent_components.path_resolver,
+                metadata_info,
+                json_representation,
+                hint_path,
+                object_storage,
+                context,
+                data_lake_settings[DataLakeStorageSetting::iceberg_use_version_hint]);
+
+            if (!committed)
+            {
+                /// Lost CAS race; another writer committed between our state-fetch and
+                /// metadata write. Clean up our partial files and retry — the target
+                /// data_paths_to_remove set is preserved across attempts.
+                cleanup();
+                continue;
+            }
+
+            LOG_INFO(log, "DROP PARTITION committed: removed {} data files ({} rows), {} position-delete files",
+                     removed_data_files, removed_records, removed_position_delete_files);
+            return;
+        }
+        catch (...)
+        {
+            cleanup();
+            throw;
+        }
     }
+
+    throw Exception(ErrorCodes::LIMIT_EXCEEDED, "Too many retries to commit Iceberg DROP PARTITION");
+#else
+    (void)command; (void)context;
+    throw Exception(ErrorCodes::NOT_IMPLEMENTED, "Iceberg DROP PARTITION requires USE_AVRO");
 #endif
 }
 

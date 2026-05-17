@@ -1,0 +1,16 @@
+--- before drop ---
+1	x
+1	y
+2	z
+3	w
+--- after drop partition 2 ---
+1	x
+1	y
+3	w
+--- after drop partition 99 (no-op) ---
+1	x
+1	y
+3	w
+--- after dropping all partitions ---
+0
+NOT_IMPLEMENTED

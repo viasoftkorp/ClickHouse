@@ -41,6 +41,20 @@ public:
         std::optional<Int64> user_defined_snapshot_id = std::nullopt,
         std::optional<Int64> user_defined_timestamp = std::nullopt);
 
+    /// Produce a snapshot for an Iceberg "delete" operation that physically removes
+    /// data files (and optionally position-delete files) from the table. The summary
+    /// reflects removed counts; running totals subtract from the parent rather than add.
+    NextMetadataResult generateNextMetadataForDelete(
+        FileNamesGenerator & generator,
+        const Iceberg::IcebergPathFromMetadata & metadata_file_path,
+        Int64 parent_snapshot_id,
+        Int64 removed_data_files,
+        Int64 removed_records,
+        Int64 removed_files_size,
+        Int64 removed_position_delete_files,
+        Int64 removed_position_deletes,
+        Int64 num_partitions);
+
     void generateAddColumnMetadata(const String & column_name, DataTypePtr type);
     void generateDropColumnMetadata(const String & column_name);
     void generateModifyColumnMetadata(const String & column_name, DataTypePtr type);

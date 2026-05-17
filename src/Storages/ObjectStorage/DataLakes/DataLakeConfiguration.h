@@ -174,7 +174,7 @@ public:
     Pipe alterPartition(const PartitionCommands & commands , ContextPtr context) override
     {
         assertInitialized();
-        current_metadata->alterPartition(commands, context);
+        return current_metadata->alterPartition(commands, context);
     }
 
     void alter(ObjectStoragePtr object_storage, const AlterCommands & params, ContextPtr context) override
