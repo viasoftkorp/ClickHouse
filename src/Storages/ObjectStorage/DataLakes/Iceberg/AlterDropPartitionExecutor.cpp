@@ -401,13 +401,14 @@ AlterDropPartitionExecutor::DropPlan::DropPlan(TargetManifests && target_manifes
                 case FileContentType::POSITION_DELETE:
                     ++removed_position_delete_files;
                     removed_position_deletes += parsed_entry.record_count;
+                    removed_files_size += parsed_entry.file_size_in_bytes;
                     break;
                 case FileContentType::EQUALITY_DELETE:
                     /// Discovery never matches equality-delete entries, so we
                     /// should never see one here. Treat as a hard error rather
                     /// than silently miscount.
                     throw Exception(
-                        ErrorCodes::NOT_IMPLEMENTED, "DROP PARTITION encountered an equality-delete entry, which is not supported");
+                        ErrorCodes::LOGICAL_ERROR, "DROP PARTITION encountered an equality-delete entry, which is not supported");
             }
             changed_partitions.insert(parsed_entry.partition_key_value);
         }
