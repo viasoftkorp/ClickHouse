@@ -590,7 +590,7 @@ bool AlterDropPartitionExecutor::tryCommit(SnapshotState & state, const DropPlan
     filename_generator.setCompressionMethod(components.metadata_compression_method);
 
     std::vector<String> files_for_cleanup;
-    bool commited = false;
+    bool committed = false;
 
     auto cleanup = [&]()
     {
@@ -610,14 +610,14 @@ bool AlterDropPartitionExecutor::tryCommit(SnapshotState & state, const DropPlan
     };
 
     SCOPE_EXIT({
-        if (!commited)
+        if (!committed)
             cleanup();
     });
 
     auto replacements = writeReplacementManifests(state, plan, filename_generator, files_for_cleanup);
     auto list_result  = writeManifestList(state, plan, replacements, filename_generator, files_for_cleanup);
 
-    if (commited = commitMetadataJSON(state, filename_generator, list_result.metadata_info); !commited)
+    if (committed = commitMetadataJSON(state, filename_generator, list_result.metadata_info); !committed)
     {
         cleanup();
         return false;

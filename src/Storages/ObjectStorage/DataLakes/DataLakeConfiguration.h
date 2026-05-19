@@ -165,13 +165,13 @@ public:
         current_metadata->checkAlterIsPossible(commands);
     }
 
-    void checkAlterPartitionIsPossible(const PartitionCommands & commands ) const override
+    void checkAlterPartitionIsPossible(const PartitionCommands & commands) const override
     {
         assertInitialized();
         current_metadata->checkAlterPartitionIsPossible(commands);
     }
 
-    Pipe alterPartition(const PartitionCommands & commands , ContextPtr context) override
+    Pipe alterPartition(const PartitionCommands & commands, ContextPtr context) override
     {
         assertInitialized();
         return current_metadata->alterPartition(commands, context);
