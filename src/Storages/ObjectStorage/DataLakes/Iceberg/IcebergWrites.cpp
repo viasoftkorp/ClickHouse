@@ -108,6 +108,138 @@ namespace FailPoints
 
 static constexpr auto MAX_TRANSACTION_RETRIES = 100;
 
+namespace
+{
+
+/// Encode one partition tuple (a vector of `Field`s, in spec order) into the
+/// manifest entry's `partition` Avro record. Shared by the regular write path
+/// (INSERT) and the EXISTING-rewrite path (DROP PARTITION).
+void writePartitionRecord(
+    avro::GenericRecord & partition_record,
+    const std::vector<String> & partition_columns,
+    const std::vector<Field> & partition_values)
+{
+    for (size_t i = 0; i < partition_columns.size(); ++i)
+    {
+        if (i >= partition_values.size())
+            break;
+        switch (partition_values[i].getType())
+        {
+            case Field::Types::Int64:
+            case Field::Types::UInt64:
+                partition_record.field(partition_columns[i]) = avro::GenericDatum(partition_values[i].safeGet<Int64>());
+                break;
+            case Field::Types::String:
+                partition_record.field(partition_columns[i]) = avro::GenericDatum(partition_values[i].safeGet<String>());
+                break;
+            case Field::Types::Float64:
+                partition_record.field(partition_columns[i]) = avro::GenericDatum(partition_values[i].safeGet<Float64>());
+                break;
+            case Field::Types::Decimal32:
+                partition_record.field(partition_columns[i]) = avro::GenericDatum(partition_values[i].safeGet<Decimal32>().getValue());
+                break;
+            case Field::Types::Decimal64:
+                partition_record.field(partition_columns[i]) = avro::GenericDatum(partition_values[i].safeGet<Decimal64>().getValue());
+                break;
+            case Field::Types::Null:
+                break;
+            default:
+                throw Exception(
+                    ErrorCodes::BAD_ARGUMENTS,
+                    "Unsupported type to write into avro file {}",
+                    partition_values[i].getType());
+        }
+    }
+}
+
+/// Copy manifest-list entries from the parent snapshot's manifest list into the
+/// new one. For each old entry whose `manifest_path` is in `skip_manifest_paths`
+/// the entry is dropped — this is the only way DROP PARTITION removes fully-
+/// matched manifests and the original copies of partially-matched ones from
+/// the new snapshot. All other entries are re-emitted *verbatim except* for
+/// `added_snapshot_id`, which is decoded/encoded to deal with iceberg-spark
+/// changing that field's type ('null,long' → 'long', see
+/// <https://github.com/apache/iceberg/pull/11626>) on older writers.
+void carryOverParentManifestListEntries(
+    const Iceberg::IcebergPathResolver & path_resolver,
+    Poco::JSON::Object::Ptr metadata,
+    Poco::JSON::Object::Ptr new_snapshot,
+    avro::DataFileWriter<avro::GenericDatum> & writer,
+    const avro::ValidSchema & schema,
+    Int32 version,
+    ObjectStoragePtr object_storage,
+    ContextPtr context,
+    const std::unordered_set<String> & skip_manifest_paths)
+{
+    if (!new_snapshot->has(Iceberg::f_parent_snapshot_id))
+        return;
+
+    auto parent_snapshot_id = new_snapshot->getValue<Int64>(Iceberg::f_parent_snapshot_id);
+    auto snapshots = metadata->getArray(Iceberg::f_snapshots);
+    for (size_t i = 0; i < snapshots->size(); ++i)
+    {
+        auto snap = snapshots->getObject(static_cast<UInt32>(i));
+        if (snap->getValue<Int64>(Iceberg::f_metadata_snapshot_id) != parent_snapshot_id)
+            continue;
+
+        auto parent_manifest_list = Iceberg::IcebergPathFromMetadata::deserialize(
+            snap->getValue<String>(Iceberg::f_manifest_list));
+        auto resolved_path = path_resolver.resolve(parent_manifest_list);
+
+        forEachAvroEntry(resolved_path, object_storage, context, "IcebergWrites",
+            [&](const avro::GenericDatum & datum)
+            {
+                const avro::GenericRecord & old_entry = datum.value<avro::GenericRecord>();
+                if (skip_manifest_paths.contains(old_entry.field(Iceberg::f_manifest_path).template value<std::string>()))
+                    return;
+
+                avro::GenericDatum new_datum(schema.root());
+                avro::GenericRecord & new_entry = new_datum.value<avro::GenericRecord>();
+                new_entry.field(Iceberg::f_manifest_path) = old_entry.field(Iceberg::f_manifest_path);
+                new_entry.field(Iceberg::f_manifest_length) = old_entry.field(Iceberg::f_manifest_length);
+                new_entry.field(Iceberg::f_partition_spec_id) = old_entry.field(Iceberg::f_partition_spec_id);
+
+                if (!old_entry.hasField(Iceberg::f_added_snapshot_id))
+                    throw Exception(
+                        ErrorCodes::ICEBERG_SPECIFICATION_VIOLATION,
+                        "Manifest list {} is missing required field '{}'",
+                        resolved_path, Iceberg::f_added_snapshot_id);
+
+                const avro::GenericDatum & old_added_snapshot_id_entry = old_entry.field(Iceberg::f_added_snapshot_id);
+                if (old_added_snapshot_id_entry.isUnion() && old_added_snapshot_id_entry.unionBranch() == 0)
+                    throw Exception(
+                        ErrorCodes::ICEBERG_SPECIFICATION_VIOLATION,
+                        "Manifest list {} has null value for field '{}', but it is required",
+                        resolved_path, Iceberg::f_added_snapshot_id);
+                new_entry.field(Iceberg::f_added_snapshot_id) = old_added_snapshot_id_entry.value<Int64>();
+
+                auto carry_over = [&](const String & field)
+                {
+                    if (old_entry.hasField(field))
+                        new_entry.field(field) = old_entry.field(field);
+                };
+                carry_over(Iceberg::f_added_files_count);
+                carry_over(Iceberg::f_existing_files_count);
+                carry_over(Iceberg::f_deleted_files_count);
+                carry_over(Iceberg::f_partitions);
+                carry_over(Iceberg::f_added_rows_count);
+                carry_over(Iceberg::f_existing_rows_count);
+                carry_over(Iceberg::f_deleted_rows_count);
+                carry_over(Iceberg::f_key_metadata);
+                if (version == 2)
+                {
+                    carry_over(Iceberg::f_content);
+                    carry_over(Iceberg::f_sequence_number);
+                    carry_over(Iceberg::f_min_sequence_number);
+                }
+                writer.write(new_datum);
+            });
+        return;
+    }
+}
+
+}
+
 // NOLINTBEGIN(clang-analyzer-core.uninitialized.UndefReturn)
 // We work a lot with avro library. Clang analyzer is about GenericDatum structure. It thinks that value in generic datum can be uninitialized.
 // No idea why
@@ -386,47 +518,7 @@ void generateManifestFile(
         data_file.field(Iceberg::f_record_count) = avro::GenericDatum(static_cast<Int64>(data_file_row_counts[file_idx]));
         data_file.field(Iceberg::f_file_size_in_bytes) = avro::GenericDatum(static_cast<Int64>(data_file_byte_counts[file_idx]));
         avro::GenericRecord & partition_record = data_file.field("partition").value<avro::GenericRecord>();
-        for (size_t i = 0; i < partition_columns.size(); ++i)
-        {
-            switch (partition_values[i].getType())
-            {
-                case Field::Types::Int64:
-                case Field::Types::UInt64:
-                    partition_record.field(partition_columns[i]) =
-                        avro::GenericDatum(partition_values[i].safeGet<Int64>());
-                    break;
-
-                case Field::Types::String:
-                    partition_record.field(partition_columns[i]) =
-                        avro::GenericDatum(partition_values[i].safeGet<String>());
-                    break;
-
-                case Field::Types::Float64:
-                    partition_record.field(partition_columns[i]) =
-                        avro::GenericDatum(partition_values[i].safeGet<Float64>());
-                    break;
-
-                case Field::Types::Decimal32:
-                    partition_record.field(partition_columns[i]) =
-                        avro::GenericDatum(partition_values[i].safeGet<Decimal32>().getValue());
-                    break;
-
-                case Field::Types::Decimal64:
-                    partition_record.field(partition_columns[i]) =
-                        avro::GenericDatum(partition_values[i].safeGet<Decimal64>().getValue());
-                    break;
-
-                case Field::Types::Null:
-                    break;
-
-                default:
-                    throw Exception(
-                        ErrorCodes::BAD_ARGUMENTS,
-                        "Unsupported type to write into avro file {}",
-                        partition_values[i].getType()
-                    );
-            }
-        }
+        writePartitionRecord(partition_record, partition_columns, partition_values);
 
         writer.write(manifest_datum);
     }
@@ -534,124 +626,10 @@ void generateManifestList(
     }
 
     if (use_previous_snapshots)
-    {
-        auto parent_snapshot_id = new_snapshot->getValue<Int64>(Iceberg::f_parent_snapshot_id);
-        auto snapshots = metadata->getArray(Iceberg::f_snapshots);
-        for (size_t i = 0; i < snapshots->size(); ++i)
-        {
-            if (snapshots->getObject(static_cast<UInt32>(i))->getValue<Int64>(Iceberg::f_metadata_snapshot_id) == parent_snapshot_id)
-            {
-                auto manifest_list = Iceberg::IcebergPathFromMetadata::deserialize(
-                    snapshots->getObject(static_cast<UInt32>(i))->getValue<String>(Iceberg::f_manifest_list));
-
-                auto resolved_manifest_list_path = path_resolver.resolve(manifest_list);
-                forEachAvroEntry(resolved_manifest_list_path, object_storage, context, "IcebergWrites",
-                    [&](const avro::GenericDatum & datum)
-                    {
-                        const avro::GenericRecord & old_entry = datum.value<avro::GenericRecord>();
-                        avro::GenericDatum new_datum(schema.root());
-                        avro::GenericRecord & new_entry = new_datum.value<avro::GenericRecord>();
-                        new_entry.field(f_manifest_path) = old_entry.field(Iceberg::f_manifest_path);
-                        new_entry.field(f_manifest_length) = old_entry.field(Iceberg::f_manifest_length);
-                        new_entry.field(f_partition_spec_id) = old_entry.field(Iceberg::f_partition_spec_id);
-                        /// In some version, iceberg-spark has changed the type of field `f_added_snapshot_id`
-                        /// from 'null, long' to 'long'. See https://github.com/apache/iceberg/pull/11626.
-                        /// Just in case that we read the old type 'null, long', we do this conversion: read every field
-                        /// and write it again with new, correct schema.
-                        if (old_entry.hasField(Iceberg::f_added_snapshot_id))
-                        {
-                            const avro::GenericDatum & old_added_snapshot_id_entry = old_entry.field(Iceberg::f_added_snapshot_id);
-                            if (old_added_snapshot_id_entry.isUnion())
-                            {
-                                if (old_added_snapshot_id_entry.unionBranch() == 0) /// it means add_snapshot_id is null
-                                {
-                                    /// This only happens when we read data written by a old version of iceberg, which violates the spec of iceberg.
-                                    throw Exception(
-                                        ErrorCodes::ICEBERG_SPECIFICATION_VIOLATION,
-                                        "Manifest list {} has null value for field '{}', but it is required",
-                                        resolved_manifest_list_path,
-                                        Iceberg::f_added_snapshot_id);
-                                }
-                            }
-                            new_entry.field(f_added_snapshot_id) = old_added_snapshot_id_entry.value<Int64>();
-                        }
-                        else
-                            /// This only happens when we read data written by a old version of iceberg, which violates the spec of iceberg.
-                            throw Exception(
-                                ErrorCodes::ICEBERG_SPECIFICATION_VIOLATION,
-                                "Manifest list {} has null value for field '{}', but it is required",
-                                resolved_manifest_list_path,
-                                Iceberg::f_added_snapshot_id);
-                        auto add_field_to_datum = [&](const String & field)
-                        {
-                            if (old_entry.hasField(field))
-                                new_entry.field(field) = old_entry.field(field);
-                        };
-                        add_field_to_datum(Iceberg::f_added_files_count);
-                        add_field_to_datum(Iceberg::f_existing_files_count);
-                        add_field_to_datum(Iceberg::f_deleted_files_count);
-                        add_field_to_datum(Iceberg::f_partitions);
-                        add_field_to_datum(Iceberg::f_added_rows_count);
-                        add_field_to_datum(Iceberg::f_existing_rows_count);
-                        add_field_to_datum(Iceberg::f_deleted_rows_count);
-                        add_field_to_datum(Iceberg::f_key_metadata);
-                        if (version == 2)
-                        {
-                            add_field_to_datum(Iceberg::f_content);
-                            add_field_to_datum(Iceberg::f_sequence_number);
-                            add_field_to_datum(Iceberg::f_min_sequence_number);
-                        }
-                        writer.write(new_datum);
-                    });
-                break;
-            }
-        }
-    }
+        carryOverParentManifestListEntries(
+            path_resolver, metadata, new_snapshot, writer, schema, version, object_storage, context, /*skip_manifest_paths=*/{});
 
     writer.close();
-}
-
-static void writePartitionRecord(
-    avro::GenericRecord & partition_record,
-    const std::vector<String> & partition_columns,
-    const std::vector<Field> & partition_values)
-{
-    for (size_t i = 0; i < partition_columns.size(); ++i)
-    {
-        if (i >= partition_values.size())
-            break;
-        switch (partition_values[i].getType())
-        {
-            case Field::Types::Int64:
-            case Field::Types::UInt64:
-                partition_record.field(partition_columns[i]) =
-                    avro::GenericDatum(partition_values[i].safeGet<Int64>());
-                break;
-            case Field::Types::String:
-                partition_record.field(partition_columns[i]) =
-                    avro::GenericDatum(partition_values[i].safeGet<String>());
-                break;
-            case Field::Types::Float64:
-                partition_record.field(partition_columns[i]) =
-                    avro::GenericDatum(partition_values[i].safeGet<Float64>());
-                break;
-            case Field::Types::Decimal32:
-                partition_record.field(partition_columns[i]) =
-                    avro::GenericDatum(partition_values[i].safeGet<Decimal32>().getValue());
-                break;
-            case Field::Types::Decimal64:
-                partition_record.field(partition_columns[i]) =
-                    avro::GenericDatum(partition_values[i].safeGet<Decimal64>().getValue());
-                break;
-            case Field::Types::Null:
-                break;
-            default:
-                throw Exception(
-                    ErrorCodes::BAD_ARGUMENTS,
-                    "Unsupported type to write into avro file {}",
-                    partition_values[i].getType());
-        }
-    }
 }
 
 void generateExistingManifestFile(
@@ -838,85 +816,11 @@ void generateManifestListForDelete(
         writer.write(entry_datum);
     }
 
-    /// Then carry over untouched manifests from the parent snapshot's manifest list.
-    auto parent_snapshot_id = new_snapshot->getValue<Int64>(Iceberg::f_parent_snapshot_id);
-    auto snapshots = metadata->getArray(Iceberg::f_snapshots);
-    for (size_t i = 0; i < snapshots->size(); ++i)
-    {
-        auto snap = snapshots->getObject(static_cast<UInt32>(i));
-        if (snap->getValue<Int64>(Iceberg::f_metadata_snapshot_id) != parent_snapshot_id)
-            continue;
-
-        auto parent_manifest_list = Iceberg::IcebergPathFromMetadata::deserialize(
-            snap->getValue<String>(Iceberg::f_manifest_list));
-
-        RelativePathWithMetadata relative_path_with_metadata(path_resolver.resolve(parent_manifest_list));
-        auto manifest_list_buf = createReadBuffer(relative_path_with_metadata, object_storage, context, getLogger("IcebergWrites"));
-
-        auto input_stream = std::make_unique<AvroInputStreamReadBufferAdapter>(*manifest_list_buf);
-        avro::DataFileReader<avro::GenericDatum> reader(std::move(input_stream));
-        const avro::ValidSchema & prev_schema = reader.readerSchema();
-        avro::GenericDatum datum(prev_schema);
-
-        while (reader.read(datum))
-        {
-            const avro::GenericRecord & old_entry = datum.value<avro::GenericRecord>();
-            String old_manifest_path = old_entry.field(Iceberg::f_manifest_path).template value<std::string>();
-            if (skip_manifest_paths.contains(old_manifest_path))
-                continue;
-
-            avro::GenericDatum new_datum(schema.root());
-            avro::GenericRecord & new_entry = new_datum.value<avro::GenericRecord>();
-            new_entry.field(Iceberg::f_manifest_path) = old_entry.field(Iceberg::f_manifest_path);
-            new_entry.field(Iceberg::f_manifest_length) = old_entry.field(Iceberg::f_manifest_length);
-            new_entry.field(Iceberg::f_partition_spec_id) = old_entry.field(Iceberg::f_partition_spec_id);
-
-            if (old_entry.hasField(Iceberg::f_added_snapshot_id))
-            {
-                const avro::GenericDatum & old_added_snapshot_id_entry = old_entry.field(Iceberg::f_added_snapshot_id);
-                if (old_added_snapshot_id_entry.isUnion())
-                {
-                    if (old_added_snapshot_id_entry.unionBranch() == 0)
-                        throw Exception(
-                            ErrorCodes::ICEBERG_SPECIFICATION_VIOLATION,
-                            "Manifest list {} has null value for field '{}', but it is required",
-                            relative_path_with_metadata.getPath(),
-                            Iceberg::f_added_snapshot_id);
-                }
-                new_entry.field(Iceberg::f_added_snapshot_id) = old_added_snapshot_id_entry.value<Int64>();
-            }
-            else
-            {
-                throw Exception(
-                    ErrorCodes::ICEBERG_SPECIFICATION_VIOLATION,
-                    "Manifest list {} is missing required field '{}'",
-                    relative_path_with_metadata.getPath(),
-                    Iceberg::f_added_snapshot_id);
-            }
-
-            auto carry_over = [&](const String & field)
-            {
-                if (old_entry.hasField(field))
-                    new_entry.field(field) = old_entry.field(field);
-            };
-            carry_over(Iceberg::f_added_files_count);
-            carry_over(Iceberg::f_existing_files_count);
-            carry_over(Iceberg::f_deleted_files_count);
-            carry_over(Iceberg::f_partitions);
-            carry_over(Iceberg::f_added_rows_count);
-            carry_over(Iceberg::f_existing_rows_count);
-            carry_over(Iceberg::f_deleted_rows_count);
-            carry_over(Iceberg::f_key_metadata);
-            if (version == 2)
-            {
-                carry_over(Iceberg::f_content);
-                carry_over(Iceberg::f_sequence_number);
-                carry_over(Iceberg::f_min_sequence_number);
-            }
-            writer.write(new_datum);
-        }
-        break;
-    }
+    /// Carry over untouched manifests from the parent snapshot, skipping the
+    /// fully-matched ones and the originals of partially-matched ones (those
+    /// are replaced by the EXISTING-status rewrites emitted above).
+    carryOverParentManifestListEntries(
+        path_resolver, metadata, new_snapshot, writer, schema, version, object_storage, context, skip_manifest_paths);
 
     /// Don't call `writer.close()` explicitly: when every parent manifest is
     /// dropped (DROP PARTITION emptying the table) no `write()` ever runs, the
