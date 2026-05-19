@@ -259,7 +259,7 @@ public:
         }
     }
 
-    virtual void checkAlterPartitionIsPossible(const PartitionCommands & /*commands*/ ) const
+    virtual void checkAlterPartitionIsPossible(const PartitionCommands & /*commands*/) const
     {
         throw Exception(ErrorCodes::NOT_IMPLEMENTED, "Alter partition commands are not supported by storage {}", getEngineName());
     }
