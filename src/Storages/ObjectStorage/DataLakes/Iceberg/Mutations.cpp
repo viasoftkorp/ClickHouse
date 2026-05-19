@@ -843,6 +843,8 @@ Pipe IcebergMetadata::alterPartition(const PartitionCommands & commands, Context
         default:
             throw Exception(ErrorCodes::NOT_IMPLEMENTED, "{} is not supported of Iceberg", command.typeToString());
     }
+
+    persistent_components.invalidateMetadataCache();
     return {};
 }
 
