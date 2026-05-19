@@ -918,7 +918,13 @@ void generateManifestListForDelete(
         break;
     }
 
-    writer.close();
+    /// Don't call `writer.close()` explicitly: when every parent manifest is
+    /// dropped (DROP PARTITION emptying the table) no `write()` ever runs, the
+    /// Avro header is unwritten, and `BinaryEncoder::flush()` would dereference
+    /// an uninitialized stream. The Avro destructor at
+    /// `contrib/avro/lang/c++/impl/DataFile.cc:125-126` writes the header
+    /// itself in that case before closing, producing a valid empty manifest
+    /// list.
 }
 
 IcebergStorageSink::IcebergStorageSink(
