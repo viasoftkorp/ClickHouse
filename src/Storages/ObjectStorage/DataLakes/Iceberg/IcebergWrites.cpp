@@ -701,8 +701,17 @@ void generateExistingManifestFile(
 
         /// Preserve the snapshot_id from the original entry (Iceberg v2 spec: EXISTING entries
         /// keep the snapshot_id that first ADDED the file, otherwise time-travel queries break).
-        Int64 snapshot_id = parsed.parsed_snapshot_id.value_or(0);
-        set_versioned_field(snapshot_id, Iceberg::f_snapshot_id);
+        /// The reader resolves inherited snapshot_id at read time but discards it
+        /// (`ManifestFileIterator.cpp` keeps only the resolved sequence_number on the wrapping
+        /// struct), so by the time we get here the only source of truth is `parsed_snapshot_id`.
+        /// An empty value means an ADDED entry with implicit snapshot_id reached us without
+        /// inheritance resolution — re-emitting it as EXISTING with `snapshot_id=0` would
+        /// corrupt the manifest, so refuse instead.
+        if (!parsed.parsed_snapshot_id.has_value())
+            throw Exception(
+                ErrorCodes::LOGICAL_ERROR,
+                "Cannot re-emit Iceberg manifest entry as EXISTING: snapshot_id is missing");
+        set_versioned_field(*parsed.parsed_snapshot_id, Iceberg::f_snapshot_id);
 
         if (version > 1)
         {
