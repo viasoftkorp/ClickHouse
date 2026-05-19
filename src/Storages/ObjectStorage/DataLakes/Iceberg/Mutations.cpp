@@ -1064,7 +1064,12 @@ void IcebergMetadata::alterPartitionDropImpl(const PartitionCommand & command, C
         std::vector<ManifestPlan> manifest_plans;
         manifest_plans.reserve(data_snapshot->manifest_list_entries.size());
 
-        Int32 schema_id = data_snapshot->schema_id_on_snapshot_commit;
+        if (data_snapshot->schema_id_on_snapshot_commit > std::numeric_limits<Int32>::max())
+            throw Exception(
+                ErrorCodes::LOGICAL_ERROR,
+                "Iceberg schema_id {} exceeds Int32 range",
+                data_snapshot->schema_id_on_snapshot_commit);
+        const Int32 schema_id = static_cast<Int32>(data_snapshot->schema_id_on_snapshot_commit);
 
         for (const auto & manifest_key : data_snapshot->manifest_list_entries)
         {
