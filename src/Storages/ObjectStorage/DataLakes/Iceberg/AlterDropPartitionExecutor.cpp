@@ -6,6 +6,8 @@
 #include <Core/Block.h>
 #include <Disks/DiskObjectStorage/ObjectStorages/StoredObject.h>
 #include <Interpreters/Context.h>
+#include <Interpreters/convertFieldToType.h>
+#include <Interpreters/evaluateConstantExpression.h>
 #include <Parsers/ASTFunction.h>
 #include <Parsers/ASTLiteral.h>
 #include <Parsers/ASTPartition.h>
@@ -34,6 +36,7 @@ namespace DB
 namespace ErrorCodes
 {
 extern const int BAD_ARGUMENTS;
+extern const int INVALID_PARTITION_VALUE;
 extern const int LIMIT_EXCEEDED;
 extern const int LOGICAL_ERROR;
 extern const int NOT_IMPLEMENTED;
@@ -84,49 +87,73 @@ void validateDropPartitionAST(const ASTPartition & ast, const PartitionCommand &
         throw Exception(ErrorCodes::LOGICAL_ERROR, "{} doesn't have partition value", command.typeToString());
 }
 
-/// Convert the (already-validated) partition AST into a tuple of Field values
-/// matching the partition spec's arity. Accepts scalar literal (arity must be
-/// 1), tuple literal, or a `tuple(...)` function call of literals. User-supplied
-/// values are taken as the already-transformed partition values (e.g. integer
-/// day-since-epoch for `day(ts)`).
-Row parsePartitionTuple(const IAST & value_ast, size_t arity)
+/// Evaluate the user-supplied DROP PARTITION expression against the Iceberg
+/// partition spec, following the same convention as `MergeTree`
+/// (`MergeTreeData::getPartitionIDFromQuery`).
+///
+/// `ParserPartition` only accepts an `ASTLiteral` or an `ASTFunction` named
+/// `tuple` here, so we only need to handle three shapes:
+///   - `ASTLiteral` with a scalar `Field`           — e.g. `DROP PARTITION 7`
+///   - `ASTLiteral` with `Field::Types::Tuple`      — e.g. `DROP PARTITION (3, '4')`
+///   - `ASTFunction{name=="tuple"}`                 — e.g. `DROP PARTITION tuple(icebergBucket(4, 'abc'))`
+///
+/// For the function form, each argument is constant-folded with
+/// `evaluateConstantExpression` (so transforms like `icebergBucket(4, 'abc')`
+/// or `toYearNumSinceEpoch(toDate('2025-01-01'))` evaluate to their
+/// partition-key value). Each resulting `Field` is then coerced to the
+/// corresponding partition-result type via `convertFieldToTypeOrThrow`.
+Row parsePartitionTuple(const IAST & value_ast, const std::vector<DataTypePtr> & partition_types, ContextPtr context)
 {
-    Row out;
-    out.reserve(arity);
+    const size_t arity = partition_types.size();
+    if (arity == 0)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "DROP PARTITION on an unpartitioned Iceberg table");
+
+    auto wrong_arity = [&](size_t got)
+    {
+        return Exception(
+            ErrorCodes::INVALID_PARTITION_VALUE,
+            "Wrong number of fields in the partition expression: {}, must be: {}",
+            got,
+            arity);
+    };
+
+    Row out(arity);
 
     if (const auto * lit = value_ast.as<ASTLiteral>())
     {
         if (lit->value.getType() == Field::Types::Tuple)
         {
-            const auto & t = lit->value.safeGet<Tuple>();
-            if (t.size() != arity)
-                throw Exception(ErrorCodes::BAD_ARGUMENTS, "DROP PARTITION value has {} fields but partition spec has {}", t.size(), arity);
-            for (const auto & f : t)
-                out.push_back(f);
+            const auto & tuple = lit->value.safeGet<Tuple>();
+            if (tuple.size() != arity)
+                throw wrong_arity(tuple.size());
+            for (size_t i = 0; i < arity; ++i)
+                out[i] = convertFieldToTypeOrThrow(tuple[i], *partition_types[i]);
             return out;
         }
+
         if (arity != 1)
-            throw Exception(ErrorCodes::BAD_ARGUMENTS, "DROP PARTITION expects a tuple of {} values for this table, got a scalar", arity);
-        out.push_back(lit->value);
+            throw wrong_arity(1);
+        out[0] = convertFieldToTypeOrThrow(lit->value, *partition_types[0]);
         return out;
     }
 
-    if (const auto * fn = value_ast.as<ASTFunction>(); fn && fn->name == "tuple")
+    const auto * fn = value_ast.as<ASTFunction>();
+    if (!fn || fn->name != "tuple")
+        throw Exception(
+            ErrorCodes::INVALID_PARTITION_VALUE,
+            "Expected literal or tuple for partition key, got {}",
+            value_ast.getID());
+
+    const auto & args = fn->arguments ? fn->arguments->children : ASTs{};
+    if (args.size() != arity)
+        throw wrong_arity(args.size());
+
+    for (size_t i = 0; i < arity; ++i)
     {
-        const auto & args = fn->arguments ? fn->arguments->children : ASTs{};
-        if (args.size() != arity)
-            throw Exception(ErrorCodes::BAD_ARGUMENTS, "DROP PARTITION value has {} fields but partition spec has {}", args.size(), arity);
-        for (const auto & arg : args)
-        {
-            const auto * arg_lit = arg->as<ASTLiteral>();
-            if (!arg_lit)
-                throw Exception(ErrorCodes::NOT_IMPLEMENTED, "DROP PARTITION supports only literal partition values for Iceberg");
-            out.push_back(arg_lit->value);
-        }
-        return out;
+        Field value = evaluateConstantExpression(args[i], context).first;
+        out[i] = convertFieldToTypeOrThrow(value, *partition_types[i]);
     }
-
-    throw Exception(ErrorCodes::NOT_IMPLEMENTED, "DROP PARTITION supports only literal partition values for Iceberg");
+    return out;
 }
 
 /// Locate the schema JSON object matching `schema_id` in the metadata.
@@ -626,7 +653,7 @@ void AlterDropPartitionExecutor::run()
         }
         SnapshotState & state = *state_opt;
 
-        const Row target_partition = parsePartitionTuple(*partition_ast.value, state.partition_columns.size());
+        const Row target_partition = parsePartitionTuple(*partition_ast.value, state.partition_types, context);
 
         if (attempt == 0)
         {
