@@ -1,11 +1,8 @@
 #include <Storages/ObjectStorage/DataLakes/Iceberg/AlterDropPartitionExecutor.h>
+#include <base/scope_guard.h>
 
 #if USE_AVRO
 
-#include <Common/FieldAccurateComparison.h>
-#include <Common/Exception.h>
-#include <Common/FailPoint.h>
-#include <Common/logger_useful.h>
 #include <Core/Block.h>
 #include <Disks/DiskObjectStorage/ObjectStorages/StoredObject.h>
 #include <Interpreters/Context.h>
@@ -20,6 +17,10 @@
 #include <Storages/ObjectStorage/DataLakes/Iceberg/SchemaProcessor.h>
 #include <Storages/ObjectStorage/DataLakes/Iceberg/StatelessMetadataFileGetter.h>
 #include <Storages/ObjectStorage/DataLakes/Iceberg/Utils.h>
+#include <Common/Exception.h>
+#include <Common/FailPoint.h>
+#include <Common/FieldAccurateComparison.h>
+#include <Common/logger_useful.h>
 
 #include <Poco/JSON/Stringifier.h>
 
@@ -32,20 +33,20 @@ namespace DB
 
 namespace ErrorCodes
 {
-    extern const int BAD_ARGUMENTS;
-    extern const int LIMIT_EXCEEDED;
-    extern const int LOGICAL_ERROR;
-    extern const int NOT_IMPLEMENTED;
+extern const int BAD_ARGUMENTS;
+extern const int LIMIT_EXCEEDED;
+extern const int LOGICAL_ERROR;
+extern const int NOT_IMPLEMENTED;
 }
 
 namespace DataLakeStorageSetting
 {
-    extern const DataLakeStorageSettingsBool iceberg_use_version_hint;
+extern const DataLakeStorageSettingsBool iceberg_use_version_hint;
 }
 
 namespace FailPoints
 {
-    extern const char iceberg_writes_cleanup[];
+extern const char iceberg_writes_cleanup[];
 }
 
 namespace Iceberg
@@ -99,17 +100,13 @@ Row parsePartitionTuple(const IAST & value_ast, size_t arity)
         {
             const auto & t = lit->value.safeGet<Tuple>();
             if (t.size() != arity)
-                throw Exception(
-                    ErrorCodes::BAD_ARGUMENTS,
-                    "DROP PARTITION value has {} fields but partition spec has {}", t.size(), arity);
+                throw Exception(ErrorCodes::BAD_ARGUMENTS, "DROP PARTITION value has {} fields but partition spec has {}", t.size(), arity);
             for (const auto & f : t)
                 out.push_back(f);
             return out;
         }
         if (arity != 1)
-            throw Exception(
-                ErrorCodes::BAD_ARGUMENTS,
-                "DROP PARTITION expects a tuple of {} values for this table, got a scalar", arity);
+            throw Exception(ErrorCodes::BAD_ARGUMENTS, "DROP PARTITION expects a tuple of {} values for this table, got a scalar", arity);
         out.push_back(lit->value);
         return out;
     }
@@ -118,24 +115,18 @@ Row parsePartitionTuple(const IAST & value_ast, size_t arity)
     {
         const auto & args = fn->arguments ? fn->arguments->children : ASTs{};
         if (args.size() != arity)
-            throw Exception(
-                ErrorCodes::BAD_ARGUMENTS,
-                "DROP PARTITION value has {} fields but partition spec has {}", args.size(), arity);
+            throw Exception(ErrorCodes::BAD_ARGUMENTS, "DROP PARTITION value has {} fields but partition spec has {}", args.size(), arity);
         for (const auto & arg : args)
         {
             const auto * arg_lit = arg->as<ASTLiteral>();
             if (!arg_lit)
-                throw Exception(
-                    ErrorCodes::NOT_IMPLEMENTED,
-                    "DROP PARTITION supports only literal partition values for Iceberg");
+                throw Exception(ErrorCodes::NOT_IMPLEMENTED, "DROP PARTITION supports only literal partition values for Iceberg");
             out.push_back(arg_lit->value);
         }
         return out;
     }
 
-    throw Exception(
-        ErrorCodes::NOT_IMPLEMENTED,
-        "DROP PARTITION supports only literal partition values for Iceberg");
+    throw Exception(ErrorCodes::NOT_IMPLEMENTED, "DROP PARTITION supports only literal partition values for Iceberg");
 }
 
 /// Locate the schema JSON object matching `schema_id` in the metadata.
@@ -177,7 +168,9 @@ std::vector<DataTypePtr> resolvePartitionTypes(
         throw Exception(
             ErrorCodes::LOGICAL_ERROR,
             "Could not resolve all partition source columns against schema {} (got {}/{} fields)",
-            schema_id, names_and_types.size(), source_ids.size());
+            schema_id,
+            names_and_types.size(),
+            source_ids.size());
 
     Block block;
     for (const auto & nat : names_and_types)
@@ -210,25 +203,6 @@ AlterDropPartitionExecutor::AlterDropPartitionExecutor(
 {
 }
 
-void AlterDropPartitionExecutor::matchEntries(
-    const std::vector<ProcessedManifestFileEntryPtr> & entries,
-    const std::unordered_set<String> & target_paths,
-    const IcebergPathResolver & path_resolver,
-    TargetManifest & out)
-{
-    for (const auto & entry : entries)
-    {
-        const auto & parsed = entry->parsed_entry;
-        if (!parsed)
-            throw Exception(ErrorCodes::LOGICAL_ERROR, "Manifest file entry is not parsed");
-        const String storage_path = path_resolver.resolve(parsed->file_path_key);
-        if (target_paths.contains(storage_path))
-            out.entries_to_remove.push_back(entry);
-        else
-            out.entries_to_keep.push_back(entry);
-    }
-}
-
 std::optional<AlterDropPartitionExecutor::SnapshotState> AlterDropPartitionExecutor::fetchSnapshotState()
 {
     auto [snapshot, table_state] = fetch_latest_state();
@@ -239,10 +213,7 @@ std::optional<AlterDropPartitionExecutor::SnapshotState> AlterDropPartitionExecu
     /// snapshot. Check once at fetch and store as Int32 in SnapshotState so
     /// downstream code never needs to re-narrow.
     if (snapshot->schema_id_on_snapshot_commit > std::numeric_limits<Int32>::max())
-        throw Exception(
-            ErrorCodes::LOGICAL_ERROR,
-            "Iceberg schema_id {} exceeds Int32 range",
-            snapshot->schema_id_on_snapshot_commit);
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Iceberg schema_id {} exceeds Int32 range", snapshot->schema_id_on_snapshot_commit);
 
     auto metadata_object = getMetadataJSONObject(
         table_state.metadata_file_path,
@@ -279,7 +250,8 @@ std::optional<AlterDropPartitionExecutor::SnapshotState> AlterDropPartitionExecu
         throw Exception(
             ErrorCodes::NOT_IMPLEMENTED,
             "DROP PARTITION is not supported on Iceberg tables with evolved partition specs "
-            "({} specs in metadata)", specs->size());
+            "({} specs in metadata)",
+            specs->size());
 
     for (size_t i = 0; i < specs->size(); ++i)
     {
@@ -300,16 +272,11 @@ std::optional<AlterDropPartitionExecutor::SnapshotState> AlterDropPartitionExecu
 
     state.partition_columns.reserve(arity);
     for (size_t i = 0; i < arity; ++i)
-        state.partition_columns.push_back(
-            partition_fields->getObject(static_cast<UInt32>(i))->getValue<String>(f_partition_name));
+        state.partition_columns.push_back(partition_fields->getObject(static_cast<UInt32>(i))->getValue<String>(f_partition_name));
 
     auto current_schema = findSchemaById(metadata_object, state.schema_id);
-    state.partition_types = resolvePartitionTypes(
-        state.partition_spec,
-        current_schema,
-        *components.schema_processor,
-        state.schema_id,
-        context);
+    state.partition_types
+        = resolvePartitionTypes(state.partition_spec, current_schema, *components.schema_processor, state.schema_id, context);
 
     return state;
 }
@@ -346,28 +313,42 @@ AlterDropPartitionExecutor::discoverTargetFilePaths(const SnapshotState & state,
 AlterDropPartitionExecutor::TargetManifests
 AlterDropPartitionExecutor::findTargetManifests(const SnapshotState & state, const TargetFilePaths & targets) const
 {
+    auto match_entries = [&](const std::vector<ProcessedManifestFileEntryPtr> & entries,
+                             const std::unordered_set<String> & target_paths,
+                             TargetManifest & out)
+    {
+        for (const auto & entry : entries)
+        {
+            const auto & parsed = entry->parsed_entry;
+            if (!parsed)
+                throw Exception(ErrorCodes::LOGICAL_ERROR, "Manifest file entry is not parsed");
+            const String storage_path = components.path_resolver.resolve(parsed->file_path_key);
+            if (target_paths.contains(storage_path))
+                out.entries_to_remove.push_back(entry);
+            else
+                out.entries_to_keep.push_back(entry);
+        }
+    };
+
     TargetManifests result;
 
     for (const auto & manifest_key : state.snapshot->manifest_list_entries)
     {
-        auto handle = getManifestFileEntriesHandle(
-            object_storage, components, context, log, manifest_key, state.schema_id);
+        TargetManifest target_manifest;
+        target_manifest.manifest_path = manifest_key.manifest_file_path;
+        target_manifest.manifest_content_type = manifest_key.content_type;
 
-        TargetManifest tm;
-        tm.manifest_path = manifest_key.manifest_file_path;
-        tm.manifest_content_type = manifest_key.content_type;
+        auto handle = getManifestFileEntriesHandle(object_storage, components, context, log, manifest_key, state.schema_id);
+        match_entries(handle.getFilesWithoutDeleted(FileContentType::DATA), targets.data, target_manifest);
+        match_entries(handle.getFilesWithoutDeleted(FileContentType::POSITION_DELETE), targets.position_delete, target_manifest);
 
-        matchEntries(handle.getFilesWithoutDeleted(FileContentType::DATA),
-                     targets.data, components.path_resolver, tm);
-        matchEntries(handle.getFilesWithoutDeleted(FileContentType::POSITION_DELETE),
-                     targets.position_delete, components.path_resolver, tm);
+        if (target_manifest.entries_to_remove.empty())
+            continue; // untouched — carried over from parent manifest list verbatim
 
-        if (tm.entries_to_remove.empty())
-            continue;  // untouched — carried over from parent manifest list verbatim
-        if (tm.entries_to_keep.empty())
-            result.fully_matched.push_back(std::move(tm));
+        if (target_manifest.entries_to_keep.empty())
+            result.fully_matched.push_back(std::move(target_manifest));
         else
-            result.partially_matched.push_back(std::move(tm));
+            result.partially_matched.push_back(std::move(target_manifest));
     }
 
     return result;
@@ -377,48 +358,44 @@ AlterDropPartitionExecutor::DropPlan::DropPlan(TargetManifests && target_manifes
     : target_manifests(std::move(target_manifests_))
 {
     std::set<Row> changed_partitions;
-    auto tally = [&](const std::vector<ProcessedManifestFileEntryPtr> & entries)
+    auto apply_entries = [&](const std::vector<ProcessedManifestFileEntryPtr> & entries)
     {
-        for (const auto & e : entries)
+        for (const auto & entry : entries)
         {
-            const auto & p = *e->parsed_entry;
-            switch (p.content_type)
+            chassert(entry->parsed_entry);
+            const auto & parsed_entry = *entry->parsed_entry;
+            switch (parsed_entry.content_type)
             {
                 case FileContentType::DATA:
                     ++removed_data_files;
-                    removed_records += p.record_count;
-                    removed_files_size += p.file_size_in_bytes;
+                    removed_records += parsed_entry.record_count;
+                    removed_files_size += parsed_entry.file_size_in_bytes;
                     break;
                 case FileContentType::POSITION_DELETE:
                     ++removed_position_delete_files;
-                    removed_position_deletes += p.record_count;
+                    removed_position_deletes += parsed_entry.record_count;
                     break;
                 case FileContentType::EQUALITY_DELETE:
                     /// Discovery never matches equality-delete entries, so we
                     /// should never see one here. Treat as a hard error rather
                     /// than silently miscount.
                     throw Exception(
-                        ErrorCodes::NOT_IMPLEMENTED,
-                        "DROP PARTITION encountered an equality-delete entry, which is not supported");
+                        ErrorCodes::NOT_IMPLEMENTED, "DROP PARTITION encountered an equality-delete entry, which is not supported");
             }
-            changed_partitions.insert(p.partition_key_value);
+            changed_partitions.insert(parsed_entry.partition_key_value);
         }
     };
 
     for (const auto & tm : target_manifests.fully_matched)
-        tally(tm.entries_to_remove);
+        apply_entries(tm.entries_to_remove);
     for (const auto & tm : target_manifests.partially_matched)
-        tally(tm.entries_to_remove);
+        apply_entries(tm.entries_to_remove);
 
     changed_partition_count = static_cast<Int64>(changed_partitions.size());
 }
 
-std::vector<AlterDropPartitionExecutor::ReplacementManifestWrite>
-AlterDropPartitionExecutor::writeReplacementManifests(
-    const SnapshotState & state,
-    const DropPlan & plan,
-    FileNamesGenerator & filename_generator,
-    std::vector<String> & files_for_cleanup)
+std::vector<AlterDropPartitionExecutor::ReplacementManifestWrite> AlterDropPartitionExecutor::writeReplacementManifests(
+    const SnapshotState & state, const DropPlan & plan, FileNamesGenerator & filename_generator, std::vector<String> & files_for_cleanup)
 {
     std::vector<ReplacementManifestWrite> result;
     result.reserve(plan.target_manifests.partially_matched.size());
@@ -442,11 +419,7 @@ AlterDropPartitionExecutor::writeReplacementManifests(
         files_for_cleanup.push_back(new_storage_path);
 
         auto buf = object_storage->writeObject(
-            StoredObject(new_storage_path),
-            WriteMode::Rewrite,
-            std::nullopt,
-            DBMS_DEFAULT_BUFFER_SIZE,
-            context->getWriteSettings());
+            StoredObject(new_storage_path), WriteMode::Rewrite, std::nullopt, DBMS_DEFAULT_BUFFER_SIZE, context->getWriteSettings());
 
         generateExistingManifestFile(
             state.metadata_object,
@@ -485,8 +458,7 @@ AlterDropPartitionExecutor::writeReplacementManifests(
     return result;
 }
 
-AlterDropPartitionExecutor::ManifestListWriteResult
-AlterDropPartitionExecutor::writeManifestList(
+AlterDropPartitionExecutor::ManifestListWriteResult AlterDropPartitionExecutor::writeManifestList(
     SnapshotState & state,
     const DropPlan & plan,
     const std::vector<ReplacementManifestWrite> & replacements,
@@ -564,18 +536,13 @@ AlterDropPartitionExecutor::writeManifestList(
 }
 
 bool AlterDropPartitionExecutor::commitMetadataJSON(
-    SnapshotState & state,
-    FileNamesGenerator & filename_generator,
-    const GeneratedMetadataFileWithInfo & metadata_info)
+    SnapshotState & state, FileNamesGenerator & filename_generator, const GeneratedMetadataFileWithInfo & metadata_info)
 {
     std::ostringstream oss; // STYLE_CHECK_ALLOW_STD_STRING_STREAM
     Poco::JSON::Stringifier::stringify(state.metadata_object, oss, 4);
     std::string json_representation = removeEscapedSlashes(oss.str());
 
-    fiu_do_on(FailPoints::iceberg_writes_cleanup,
-    {
-        throw Exception(ErrorCodes::BAD_ARGUMENTS, "Failpoint for cleanup enabled");
-    });
+    fiu_do_on(FailPoints::iceberg_writes_cleanup, { throw Exception(ErrorCodes::BAD_ARGUMENTS, "Failpoint for cleanup enabled"); });
 
     auto hint_path = filename_generator.generateVersionHint();
     return writeMetadataFileAndVersionHint(
@@ -591,44 +558,51 @@ bool AlterDropPartitionExecutor::commitMetadataJSON(
 bool AlterDropPartitionExecutor::tryCommit(SnapshotState & state, const DropPlan & plan)
 {
     FileNamesGenerator filename_generator(
-        components.path_resolver.getTableLocation(),
-        false,
-        components.metadata_compression_method,
-        write_format);
+        components.path_resolver.getTableLocation(), false, components.metadata_compression_method, write_format);
     filename_generator.setVersion(state.table_state.metadata_version + 1);
     filename_generator.setCompressionMethod(components.metadata_compression_method);
 
     std::vector<String> files_for_cleanup;
+    bool commited = false;
+
     auto cleanup = [&]()
     {
-        for (const auto & p : files_for_cleanup)
+        for (const auto & path : files_for_cleanup)
         {
-            try { object_storage->removeObjectIfExists(StoredObject(p)); }
-            catch (...) { tryLogCurrentException(log, "Failed to clean up partially-written manifest"); }
+            try
+            {
+                object_storage->removeObjectIfExists(StoredObject(path));
+            }
+            catch (...)
+            {
+                tryLogCurrentException(log, fmt::format("Failed to clean up partially-written manifest {}", path));
+            }
         }
+
+        files_for_cleanup.clear();
     };
 
-    try
-    {
-        auto replacements = writeReplacementManifests(state, plan, filename_generator, files_for_cleanup);
-        auto list_result = writeManifestList(state, plan, replacements, filename_generator, files_for_cleanup);
-        const bool committed = commitMetadataJSON(state, filename_generator, list_result.metadata_info);
-
-        if (!committed)
-        {
+    SCOPE_EXIT({
+        if (!commited)
             cleanup();
-            return false;
-        }
+    });
 
-        LOG_INFO(log, "DROP PARTITION committed: removed {} data files ({} rows), {} position-delete files",
-                 plan.removed_data_files, plan.removed_records, plan.removed_position_delete_files);
-        return true;
-    }
-    catch (...)
+    auto replacements = writeReplacementManifests(state, plan, filename_generator, files_for_cleanup);
+    auto list_result  = writeManifestList(state, plan, replacements, filename_generator, files_for_cleanup);
+
+    if (commited = commitMetadataJSON(state, filename_generator, list_result.metadata_info); !commited)
     {
         cleanup();
-        throw;
+        return false;
     }
+
+    LOG_INFO(
+        log,
+        "DROP PARTITION committed: removed {} data files ({} rows), {} position-delete files",
+        plan.removed_data_files,
+        plan.removed_records,
+        plan.removed_position_delete_files);
+    return true;
 }
 
 void AlterDropPartitionExecutor::run()
@@ -668,7 +642,6 @@ void AlterDropPartitionExecutor::run()
 
         if (tryCommit(state, plan))
             return;
-        /// Lost CAS race; next iteration re-finds `targets` in the fresh snapshot.
     }
 
     throw Exception(ErrorCodes::LIMIT_EXCEEDED, "Too many retries to commit Iceberg DROP PARTITION");
