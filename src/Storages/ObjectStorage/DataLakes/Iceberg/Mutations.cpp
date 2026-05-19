@@ -812,6 +812,8 @@ void alter(
 
 }
 
+#if USE_AVRO
+
 namespace DB
 {
 
@@ -824,7 +826,6 @@ Pipe IcebergMetadata::alterPartition(const PartitionCommands & commands, Context
             "Alter iceberg is experimental. "
             "To allow its usage, enable setting allow_insert_into_iceberg");
     }
-#if USE_AVRO
     if (commands.size() != 1)
         throw Exception(ErrorCodes::BAD_ARGUMENTS, "Params with size 1 is not supported");
 
@@ -842,16 +843,12 @@ Pipe IcebergMetadata::alterPartition(const PartitionCommands & commands, Context
         default:
             throw Exception(ErrorCodes::NOT_IMPLEMENTED, "{} is not supported of Iceberg", command.typeToString());
     }
-#else
-    throw Exception(ErrorCodes::NOT_IMPLEMENTED, "Alter partition is not supported of Iceberg", command.typeToString());
-#endif
     return {};
 }
 
 
 void IcebergMetadata::alterPartitionDropImpl(const PartitionCommand & command, ContextPtr context)
 {
-#if USE_AVRO
     Iceberg::AlterDropPartitionExecutor executor(
         command,
         context,
@@ -862,11 +859,8 @@ void IcebergMetadata::alterPartitionDropImpl(const PartitionCommand & command, C
         log,
         [this, context]() { return getRelevantState(context, /*force_fetch_latest_metadata=*/true); });
     executor.run();
-#else
-    (void)command;
-    (void)context;
-    throw Exception(ErrorCodes::NOT_IMPLEMENTED, "Iceberg DROP PARTITION requires USE_AVRO");
-#endif
 }
 
 }
+
+#endif
