@@ -189,6 +189,11 @@ void carryOverParentManifestListEntries(
         forEachAvroEntry(resolved_path, object_storage, context, "IcebergWrites",
             [&](const avro::GenericDatum & datum)
             {
+                if (datum.type() != avro::AVRO_RECORD)
+                    throw Exception(
+                        ErrorCodes::ICEBERG_SPECIFICATION_VIOLATION,
+                        "Manifest list {} entry is not a record (got Avro type {})",
+                        resolved_path, static_cast<int>(datum.type()));
                 const avro::GenericRecord & old_entry = datum.value<avro::GenericRecord>();
                 if (skip_manifest_paths.contains(old_entry.field(Iceberg::f_manifest_path).template value<std::string>()))
                     return;
