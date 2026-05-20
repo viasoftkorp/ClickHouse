@@ -11,7 +11,7 @@ from helpers.iceberg_utils import (
 
 
 @pytest.mark.parametrize("storage_type", ["s3", "local"])
-def test_drop_partition_concurrent_insert_does_not_drop_new_file(started_cluster_iceberg_with_spark, storage_type):
+def test_drop_partition_concurrent_insert_does_not_drop_new_file(started_cluster_iceberg_no_spark, storage_type):
     """The DROP PARTITION executor locks the set of target file paths on its
     first attempt and never refreshes them on retry. So a file added by a
     concurrent INSERT after DROP PARTITION has begun discovery must survive
@@ -21,14 +21,14 @@ def test_drop_partition_concurrent_insert_does_not_drop_new_file(started_cluster
     the same partition, then lets the executor proceed. The retry loop sees
     a fresh parent snapshot but the locked target set still contains only
     the pre-INSERT files, so the new file survives."""
-    instance = started_cluster_iceberg_with_spark.instances["node1"]
+    instance = started_cluster_iceberg_no_spark.instances["node1"]
     table_name = f"test_drop_partition_race_{storage_type}_{get_uuid_str()}"
 
     create_iceberg_table(
         storage_type,
         instance,
         table_name,
-        started_cluster_iceberg_with_spark,
+        started_cluster_iceberg_no_spark,
         schema="(a Int64, b String)",
         partition_by="(identity(a))",
         format_version=2,
