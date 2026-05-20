@@ -79,6 +79,13 @@ def test_drop_partition_concurrent_insert_does_not_drop_new_file(started_cluster
         # 5. DROP completes.
         drop_future.result(timeout=120)
     finally:
+        # Always disable the failpoint -- if anything above raised before the
+        # explicit DISABLE ran (e.g. the WAIT timed out), it would otherwise
+        # stay enabled and poison subsequent tests on the same instance.
+        try:
+            instance.query("SYSTEM DISABLE FAILPOINT iceberg_drop_partition_pause_after_discovery")
+        except Exception:
+            pass
         executor.shutdown(wait=False)
 
     # 6. The two pre-drop files for a=1 are gone; the concurrently-inserted row survives,

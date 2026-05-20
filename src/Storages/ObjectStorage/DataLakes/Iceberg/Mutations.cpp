@@ -827,7 +827,10 @@ Pipe IcebergMetadata::alterPartition(const PartitionCommands & commands, Context
             "To allow its usage, enable setting allow_insert_into_iceberg");
     }
     if (commands.size() != 1)
-        throw Exception(ErrorCodes::BAD_ARGUMENTS, "Params with size 1 is not supported");
+        throw Exception(
+            ErrorCodes::BAD_ARGUMENTS,
+            "ALTER TABLE ... on Iceberg expects exactly one partition command, got {}",
+            commands.size());
 
     const auto & command = commands.at(0);
 
@@ -835,13 +838,13 @@ Pipe IcebergMetadata::alterPartition(const PartitionCommands & commands, Context
     {
         case PartitionCommand::Type::DROP_PARTITION: {
             if (command.part || command.detach)
-                throw Exception(ErrorCodes::NOT_IMPLEMENTED, "{} is not supported of Iceberg", command.typeToString());
+                throw Exception(ErrorCodes::NOT_IMPLEMENTED, "{} is not supported by Iceberg", command.typeToString());
 
             alterPartitionDropImpl(command, context);
             break;
         }
         default:
-            throw Exception(ErrorCodes::NOT_IMPLEMENTED, "{} is not supported of Iceberg", command.typeToString());
+            throw Exception(ErrorCodes::NOT_IMPLEMENTED, "{} is not supported by Iceberg", command.typeToString());
     }
 
     persistent_components.invalidateMetadataCache();

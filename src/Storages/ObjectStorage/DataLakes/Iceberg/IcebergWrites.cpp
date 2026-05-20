@@ -751,6 +751,7 @@ void generateManifestListForDelete(
     ContextPtr context,
     Poco::JSON::Object::Ptr new_snapshot,
     const std::vector<ManifestListEntryForDelete> & new_entries,
+    Int64 partition_spec_id,
     const std::unordered_set<String> & skip_manifest_paths,
     WriteBuffer & buf)
 {
@@ -802,7 +803,7 @@ void generateManifestListForDelete(
 
         entry.field(Iceberg::f_manifest_path) = e.manifest_path.serialize();
         entry.field(Iceberg::f_manifest_length) = e.manifest_length;
-        entry.field(Iceberg::f_partition_spec_id) = metadata->getValue<Int64>(Iceberg::f_default_spec_id);
+        entry.field(Iceberg::f_partition_spec_id) = partition_spec_id;
         if (version > 1)
         {
             entry.field(Iceberg::f_content) = static_cast<Int32>(e.content_type);

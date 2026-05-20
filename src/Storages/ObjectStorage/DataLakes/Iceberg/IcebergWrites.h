@@ -124,6 +124,7 @@ void generateManifestListForDelete(
     ContextPtr context,
     Poco::JSON::Object::Ptr new_snapshot,
     const std::vector<ManifestListEntryForDelete> & new_entries,
+    Int64 partition_spec_id,
     const std::unordered_set<String> & skip_manifest_paths,
     WriteBuffer & buf);
 

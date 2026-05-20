@@ -390,7 +390,8 @@ AlterDropPartitionExecutor::DropPlan::DropPlan(TargetManifests && target_manifes
     {
         for (const auto & entry : entries)
         {
-            chassert(entry->parsed_entry);
+            if (!entry->parsed_entry)
+                throw Exception(ErrorCodes::LOGICAL_ERROR, "Manifest file entry is not parsed");
             const auto & parsed_entry = *entry->parsed_entry;
             switch (parsed_entry.content_type)
             {
@@ -556,6 +557,7 @@ AlterDropPartitionExecutor::ManifestListWriteResult AlterDropPartitionExecutor::
             context,
             new_snapshot_result.snapshot,
             new_entries,
+            state.partition_spec_id,
             skip_manifest_paths,
             *buf);
         buf->finalize();
@@ -619,11 +621,9 @@ bool AlterDropPartitionExecutor::tryCommit(SnapshotState & state, const DropPlan
     auto replacements = writeReplacementManifests(state, plan, filename_generator, files_for_cleanup);
     auto list_result  = writeManifestList(state, plan, replacements, filename_generator, files_for_cleanup);
 
-    if (committed = commitMetadataJSON(state, filename_generator, list_result.metadata_info); !committed)
-    {
-        cleanup();
+    committed = commitMetadataJSON(state, filename_generator, list_result.metadata_info);
+    if (!committed)
         return false;
-    }
 
     LOG_INFO(
         log,
