@@ -596,26 +596,21 @@ bool AlterDropPartitionExecutor::tryCommit(SnapshotState & state, const DropPlan
     std::vector<String> files_for_cleanup;
     bool committed = false;
 
-    auto cleanup = [&]()
-    {
-        for (const auto & path : files_for_cleanup)
-        {
-            try
-            {
-                object_storage->removeObjectIfExists(StoredObject(path));
-            }
-            catch (...)
-            {
-                tryLogCurrentException(log, fmt::format("Failed to clean up partially-written manifest {}", path));
-            }
-        }
-
-        files_for_cleanup.clear();
-    };
-
     SCOPE_EXIT({
         if (!committed)
-            cleanup();
+        {
+            for (const auto & path : files_for_cleanup)
+            {
+                try
+                {
+                    object_storage->removeObjectIfExists(StoredObject(path));
+                }
+                catch (...)
+                {
+                    tryLogCurrentException(log, fmt::format("Failed to clean up partially-written manifest {}", path));
+                }
+            }
+        }
     });
 
     auto replacements = writeReplacementManifests(state, plan, filename_generator, files_for_cleanup);
