@@ -50,6 +50,7 @@ extern const DataLakeStorageSettingsBool iceberg_use_version_hint;
 namespace FailPoints
 {
 extern const char iceberg_writes_cleanup[];
+extern const char iceberg_drop_partition_pause_after_discovery[];
 }
 
 namespace Iceberg
@@ -664,6 +665,7 @@ void AlterDropPartitionExecutor::run()
                 LOG_INFO(log, "No data files match the requested partition; DROP PARTITION is a no-op");
                 return;
             }
+            FailPointInjection::pauseFailPoint(FailPoints::iceberg_drop_partition_pause_after_discovery);
         }
 
         DropPlan plan{findTargetManifests(state, targets)};
