@@ -38,3 +38,23 @@ ${CLICKHOUSE_CLIENT} --query "SELECT a, b FROM ${TABLE} ORDER BY a, b SETTINGS i
 
 ${CLICKHOUSE_CLIENT} --query "DROP TABLE IF EXISTS ${TABLE}"
 rm -rf "${TABLE_PATH}"
+
+# Decimal partition columns are currently rejected on CREATE TABLE by the
+# Iceberg writer ("Unsupported type for iceberg Decimal(...)") -- separate
+# from DROP PARTITION. The Decimal32/Decimal64 cases in `writePartitionRecord`
+# are reachable only via Spark-written tables today. When Decimal partition
+# columns become writable, uncomment to verify DROP PARTITION matches by
+# Decimal value.
+#
+# TABLE="t_${CLICKHOUSE_DATABASE}_${RANDOM}_dec"
+# TABLE_PATH="${USER_FILES_PATH}/${TABLE}/"
+# ${CLICKHOUSE_CLIENT} --query "
+#     CREATE TABLE ${TABLE} (id Int64, d Decimal32(2))
+#     ENGINE = IcebergLocal('${TABLE_PATH}', 'Parquet')
+#     PARTITION BY (d)
+# "
+# ${CLICKHOUSE_CLIENT} --allow_insert_into_iceberg=1 --query "INSERT INTO ${TABLE} VALUES (1, 1.50), (2, 1.50), (3, 2.75)"
+# ${CLICKHOUSE_CLIENT} --allow_insert_into_iceberg=1 --query "ALTER TABLE ${TABLE} DROP PARTITION 1.50"
+# ${CLICKHOUSE_CLIENT} --query "SELECT id, d FROM ${TABLE} ORDER BY id"
+# ${CLICKHOUSE_CLIENT} --query "DROP TABLE IF EXISTS ${TABLE}"
+# rm -rf "${TABLE_PATH}"
