@@ -2,6 +2,8 @@
 #include <Storages/ObjectStorage/DataLakes/Iceberg/MetadataGenerator.h>
 
 #include <climits>
+#include <string_view>
+#include <type_traits>
 #include <Poco/JSON/Array.h>
 #include <Poco/JSON/Object.h>
 #include <Poco/JSON/Stringifier.h>
@@ -12,6 +14,7 @@
 #include <Storages/ObjectStorage/DataLakes/Iceberg/Constant.h>
 #include <Storages/ObjectStorage/DataLakes/Iceberg/Utils.h>
 #include <Storages/ObjectStorage/DataLakes/Iceberg/IcebergWrites.h>
+#include <base/types.h>
 
 #if USE_AVRO
 
@@ -114,12 +117,7 @@ MetadataGenerator::NextMetadataResult MetadataGenerator::generateNextMetadata(
     FileNamesGenerator & generator,
     const Iceberg::IcebergPathFromMetadata & metadata_file_path,
     Int64 parent_snapshot_id,
-    Int64 added_files,
-    Int64 added_records,
-    Int64 added_files_size,
-    Int64 num_partitions,
-    Int64 added_delete_files,
-    Int64 num_deleted_rows,
+    SnapshotSummary snapshot_summary,
     std::optional<Int64> user_defined_snapshot_id,
     std::optional<Int64> user_defined_timestamp)
 {
@@ -143,38 +141,13 @@ MetadataGenerator::NextMetadataResult MetadataGenerator::generateNextMetadata(
     new_snapshot->set(Iceberg::f_timestamp_ms, timestamp);
     metadata_object->set(Iceberg::f_last_updated_ms, timestamp);
 
-    auto parent_snapshot = getParentSnapshot(parent_snapshot_id);
+    if (auto parent_snapshot = getParentSnapshot(parent_snapshot_id))
+        snapshot_summary.applyTotalsFromParent(SnapshotSummary::parse(*parent_snapshot));
+
     Poco::JSON::Object::Ptr summary = new Poco::JSON::Object;
-    if (num_deleted_rows == 0)
-    {
-        summary->set(Iceberg::f_operation, Iceberg::f_append);
-        summary->set(Iceberg::f_added_data_files, std::to_string(added_files));
-        summary->set(Iceberg::f_added_records, std::to_string(added_records));
-        summary->set(Iceberg::f_added_files_size, std::to_string(added_files_size));
-        summary->set(Iceberg::f_changed_partition_count, std::to_string(num_partitions));
-    }
-    else
-    {
-        summary->set(Iceberg::f_operation, Iceberg::f_overwrite);
-        summary->set(Iceberg::f_added_delete_files, std::to_string(added_delete_files));
-        summary->set(Iceberg::f_added_position_delete_files, std::to_string(added_delete_files));
-        summary->set(Iceberg::f_added_files_size, std::to_string(added_files_size));
-        summary->set(Iceberg::f_added_position_deletes, std::to_string(num_deleted_rows));
-        summary->set(Iceberg::f_changed_partition_count, std::to_string(num_partitions));
-    }
 
-    auto sum_with_parent_snapshot = [&](const char * field_name, Int64 snapshot_value)
-    {
-        Int64 prev_value = parent_snapshot ? parse<Int64>(parent_snapshot->getObject(Iceberg::f_summary)->getValue<String>(field_name)) : 0;
-        summary->set(field_name, std::to_string(prev_value + snapshot_value));
-    };
+    snapshot_summary.fill(*summary);
 
-    sum_with_parent_snapshot(Iceberg::f_total_records, added_records);
-    sum_with_parent_snapshot(Iceberg::f_total_files_size, added_files_size);
-    sum_with_parent_snapshot(Iceberg::f_total_data_files, added_files);
-    sum_with_parent_snapshot(Iceberg::f_total_delete_files, added_delete_files);
-    sum_with_parent_snapshot(Iceberg::f_total_position_deletes, num_deleted_rows);
-    sum_with_parent_snapshot(Iceberg::f_total_equality_deletes, 0);
     new_snapshot->set(Iceberg::f_summary, summary);
 
     new_snapshot->set(Iceberg::f_schema_id, metadata_object->getValue<Int32>(Iceberg::f_current_schema_id));
@@ -210,7 +183,7 @@ MetadataGenerator::NextMetadataResult MetadataGenerator::generateNextMetadata(
         metadata_object->getArray(Iceberg::f_snapshot_log)->add(new_snapshot_item);
     }
 
-    if (added_delete_files > 0)
+    if (snapshot_summary.added_delete_files > 0)
     {
         if (!metadata_object->has(Iceberg::f_properties))
         {
@@ -222,98 +195,6 @@ MetadataGenerator::NextMetadataResult MetadataGenerator::generateNextMetadata(
         properties->set("write.delete.mode", "merge-on-read");
         properties->set("write.merge.mode", "merge-on-read");
         properties->set("write.update.mode", "merge-on-read");
-    }
-    return {new_snapshot, manifest_list_path};
-}
-
-MetadataGenerator::NextMetadataResult MetadataGenerator::generateNextMetadataForDelete(
-    FileNamesGenerator & generator,
-    const Iceberg::IcebergPathFromMetadata & metadata_file_path,
-    Int64 parent_snapshot_id,
-    Int64 removed_data_files,
-    Int64 removed_records,
-    Int64 removed_files_size,
-    Int64 removed_position_delete_files,
-    Int64 removed_position_deletes,
-    Int64 num_partitions)
-{
-    int format_version = metadata_object->getValue<Int32>(Iceberg::f_format_version);
-    Poco::JSON::Object::Ptr new_snapshot = new Poco::JSON::Object;
-    if (format_version > 1)
-    {
-        auto sequence_number = getMaxSequenceNumber() + 1;
-        new_snapshot->set(Iceberg::f_metadata_sequence_number, sequence_number);
-        metadata_object->set(Iceberg::f_last_sequence_number, sequence_number);
-    }
-    Int64 snapshot_id = static_cast<Int64>(dis(gen));
-
-    auto manifest_list_path = generator.generateManifestListName(snapshot_id, format_version);
-    new_snapshot->set(Iceberg::f_metadata_snapshot_id, snapshot_id);
-    new_snapshot->set(Iceberg::f_parent_snapshot_id, parent_snapshot_id);
-
-    auto now = std::chrono::system_clock::now();
-    auto ms = duration_cast<std::chrono::milliseconds>(now.time_since_epoch());
-    Int64 timestamp = ms.count();
-    new_snapshot->set(Iceberg::f_timestamp_ms, timestamp);
-    metadata_object->set(Iceberg::f_last_updated_ms, timestamp);
-
-    auto parent_snapshot = getParentSnapshot(parent_snapshot_id);
-    Poco::JSON::Object::Ptr summary = new Poco::JSON::Object;
-    summary->set(Iceberg::f_operation, Iceberg::f_delete);
-    summary->set(Iceberg::f_removed_data_files, std::to_string(removed_data_files));
-    summary->set(Iceberg::f_deleted_data_files, std::to_string(removed_data_files));
-    summary->set(Iceberg::f_deleted_records, std::to_string(removed_records));
-    summary->set(Iceberg::f_removed_files_size, std::to_string(removed_files_size));
-    if (removed_position_delete_files > 0)
-    {
-        summary->set(Iceberg::f_removed_position_delete_files, std::to_string(removed_position_delete_files));
-    }
-    summary->set(Iceberg::f_changed_partition_count, std::to_string(num_partitions));
-
-    auto sum_with_parent_snapshot = [&](const char * field_name, Int64 delta)
-    {
-        Int64 prev_value = parent_snapshot ? parse<Int64>(parent_snapshot->getObject(Iceberg::f_summary)->getValue<String>(field_name)) : 0;
-        summary->set(field_name, std::to_string(prev_value + delta));
-    };
-
-    sum_with_parent_snapshot(Iceberg::f_total_records, -removed_records);
-    sum_with_parent_snapshot(Iceberg::f_total_files_size, -removed_files_size);
-    sum_with_parent_snapshot(Iceberg::f_total_data_files, -removed_data_files);
-    sum_with_parent_snapshot(Iceberg::f_total_delete_files, -removed_position_delete_files);
-    sum_with_parent_snapshot(Iceberg::f_total_position_deletes, -removed_position_deletes);
-    sum_with_parent_snapshot(Iceberg::f_total_equality_deletes, 0);
-    new_snapshot->set(Iceberg::f_summary, summary);
-
-    new_snapshot->set(Iceberg::f_schema_id, metadata_object->getValue<Int32>(Iceberg::f_current_schema_id));
-    new_snapshot->set(Iceberg::f_manifest_list, manifest_list_path.serialize());
-
-    metadata_object->getArray(Iceberg::f_snapshots)->add(new_snapshot);
-    metadata_object->set(Iceberg::f_current_snapshot_id, snapshot_id);
-
-    if (!metadata_object->has(Iceberg::f_refs))
-        metadata_object->set(Iceberg::f_refs, new Poco::JSON::Object);
-
-    if (!metadata_object->getObject(Iceberg::f_refs)->has(Iceberg::f_main))
-    {
-        Poco::JSON::Object::Ptr branch = new Poco::JSON::Object;
-        branch->set(Iceberg::f_metadata_snapshot_id, snapshot_id);
-        branch->set(Iceberg::f_type, Iceberg::f_branch);
-        metadata_object->getObject(Iceberg::f_refs)->set(Iceberg::f_main, branch);
-    }
-    else
-        metadata_object->getObject(Iceberg::f_refs)->getObject(Iceberg::f_main)->set(Iceberg::f_metadata_snapshot_id, snapshot_id);
-
-    {
-        Poco::JSON::Object::Ptr new_metadata_item = new Poco::JSON::Object;
-        new_metadata_item->set(Iceberg::f_metadata_file, metadata_file_path.serialize());
-        new_metadata_item->set(Iceberg::f_timestamp_ms, timestamp);
-        metadata_object->getArray(Iceberg::f_metadata_log)->add(new_metadata_item);
-    }
-    {
-        Poco::JSON::Object::Ptr new_snapshot_item = new Poco::JSON::Object;
-        new_snapshot_item->set(Iceberg::f_metadata_snapshot_id, snapshot_id);
-        new_snapshot_item->set(Iceberg::f_timestamp_ms, timestamp);
-        metadata_object->getArray(Iceberg::f_snapshot_log)->add(new_snapshot_item);
     }
     return {new_snapshot, manifest_list_path};
 }
@@ -483,6 +364,170 @@ void MetadataGenerator::generateRenameColumnMetadata(const String & column_name,
     metadata_object->getArray(Iceberg::f_schemas)->add(current_schema);
 }
 
+void MetadataGenerator::SnapshotSummary::applyTotalsFromParent(const SnapshotSummary & parent)
+{
+    switch (operation)
+    {
+        case Operation::APPEND:
+        case Operation::OVERWRITE:
+            total_records = parent.total_records + added_records;
+            total_files_size = parent.total_files_size + added_files_size;
+            total_data_files = parent.total_data_files + added_files;
+            total_delete_files = parent.total_delete_files + added_delete_files;
+            total_position_deletes = parent.total_position_deletes + num_deleted_rows;
+            total_equality_deletes = parent.total_equality_deletes;
+            break;
+        case Operation::DELETE:
+            total_records = parent.total_records - removed_records;
+            total_files_size = parent.total_files_size - removed_files_size;
+            total_data_files = parent.total_data_files - removed_data_files;
+            total_delete_files = parent.total_delete_files - removed_position_delete_files;
+            total_position_deletes = parent.total_position_deletes - removed_position_deletes;
+            total_equality_deletes = parent.total_equality_deletes;
+            break;
+    }
+}
+
+void MetadataGenerator::SnapshotSummary::fill(Poco::JSON::Object & obj) const
+{
+    /// https://iceberg.apache.org/spec/?h=summary#optional-snapshot-summary-fields
+    /// Snapshot summary can include metrics fields to track numeric stats of the snapshot (see Metrics) and operational details (see Other Fields).
+    /// The value of these fields should be of string type (e.g., "120").
+    auto set_as_string = [&](const char * field, Int64 val)
+    {
+        obj.set(field, std::to_string(val));
+    };
+
+    switch (operation)
+    {
+        case Operation::APPEND:
+        {
+            chassert(num_deleted_rows == 0);
+            obj.set(Iceberg::f_operation, Iceberg::f_append);
+            set_as_string(Iceberg::f_added_data_files, added_files);
+            set_as_string(Iceberg::f_added_records, added_records);
+            set_as_string(Iceberg::f_added_files_size, added_files_size);
+            set_as_string(Iceberg::f_changed_partition_count, num_partitions);
+            break;
+        }
+        case Operation::OVERWRITE:
+        {
+            chassert(num_deleted_rows != 0);
+            obj.set(Iceberg::f_operation, Iceberg::f_overwrite);
+            set_as_string(Iceberg::f_added_delete_files, added_delete_files);
+            set_as_string(Iceberg::f_added_position_delete_files, added_delete_files);
+            set_as_string(Iceberg::f_added_files_size, added_files_size);
+            set_as_string(Iceberg::f_added_position_deletes, num_deleted_rows);
+            set_as_string(Iceberg::f_changed_partition_count, num_partitions);
+            break;
+        }
+        case Operation::DELETE:
+        {
+            obj.set(Iceberg::f_operation, Iceberg::f_delete);
+            set_as_string(Iceberg::f_removed_data_files, removed_data_files);
+            set_as_string(Iceberg::f_deleted_data_files, removed_data_files);
+            set_as_string(Iceberg::f_deleted_records, removed_records);
+            set_as_string(Iceberg::f_removed_files_size, removed_files_size);
+            if (removed_position_delete_files > 0)
+                set_as_string(Iceberg::f_removed_position_delete_files, removed_position_delete_files);
+            set_as_string(Iceberg::f_changed_partition_count, num_partitions);
+            break;
+        }
+    }
+
+    set_as_string(Iceberg::f_total_records, total_records);
+    set_as_string(Iceberg::f_total_files_size, total_files_size);
+    set_as_string(Iceberg::f_total_data_files, total_data_files);
+    set_as_string(Iceberg::f_total_delete_files, total_delete_files);
+    set_as_string(Iceberg::f_total_position_deletes, total_position_deletes);
+    set_as_string(Iceberg::f_total_equality_deletes, total_equality_deletes);
+}
+
+MetadataGenerator::SnapshotSummary MetadataGenerator::SnapshotSummary::createAppend(
+    Int64 added_files, Int64 added_records, Int64 added_files_size, Int64 num_partitions)
+{
+    SnapshotSummary result;
+    result.operation = Operation::APPEND;
+    result.added_files = added_files;
+    result.added_records = added_records;
+    result.added_files_size = added_files_size;
+    result.num_partitions = num_partitions;
+    return result;
+}
+
+MetadataGenerator::SnapshotSummary MetadataGenerator::SnapshotSummary::createOverwrite(
+    Int64 added_delete_files, Int64 added_files_size, Int64 num_partitions, Int64 num_deleted_rows)
+{
+    SnapshotSummary result;
+    result.operation = Operation::OVERWRITE;
+    result.added_delete_files = added_delete_files;
+    result.added_files_size = added_files_size;
+    result.num_partitions = num_partitions;
+    result.num_deleted_rows = num_deleted_rows;
+    return result;
+}
+
+MetadataGenerator::SnapshotSummary MetadataGenerator::SnapshotSummary::createDelete(
+    Int64 removed_data_files,
+    Int64 removed_records,
+    Int64 removed_files_size,
+    Int64 removed_position_delete_files,
+    Int64 removed_position_deletes,
+    Int64 num_partitions)
+{
+    SnapshotSummary result;
+    result.operation = Operation::DELETE;
+    result.removed_data_files = removed_data_files;
+    result.removed_records = removed_records;
+    result.removed_files_size = removed_files_size;
+    result.removed_position_delete_files = removed_position_delete_files;
+    result.removed_position_deletes = removed_position_deletes;
+    result.num_partitions = num_partitions;
+    return result;
+}
+
+MetadataGenerator::SnapshotSummary MetadataGenerator::SnapshotSummary::parse(const Poco::JSON::Object & obj)
+{
+    SnapshotSummary result;
+
+    const auto operation_str = obj.getValue<String>(Iceberg::f_operation);
+    if (operation_str == Iceberg::f_append)
+        result.operation = Operation::APPEND;
+    else if (operation_str == Iceberg::f_overwrite)
+        result.operation = Operation::OVERWRITE;
+    else if (operation_str == Iceberg::f_delete)
+        result.operation = Operation::DELETE;
+    else
+        throw Exception(ErrorCodes::BAD_ARGUMENTS, "Unknown snapshot summary operation: {}", operation_str);
+
+    /// Iceberg spec stores all summary metric values as strings (e.g., "120").
+    auto get_optional_int = [&](const char * field) -> Int64
+    {
+        if (!obj.has(field))
+            return 0;
+        return DB::parse<Int64>(obj.getValue<String>(field));
+    };
+
+    result.added_files = get_optional_int(Iceberg::f_added_data_files);
+    result.added_records = get_optional_int(Iceberg::f_added_records);
+    result.added_files_size = get_optional_int(Iceberg::f_added_files_size);
+    result.num_partitions = get_optional_int(Iceberg::f_changed_partition_count);
+    result.added_delete_files = get_optional_int(Iceberg::f_added_delete_files);
+    result.num_deleted_rows = get_optional_int(Iceberg::f_added_position_deletes);
+    result.removed_data_files = get_optional_int(Iceberg::f_removed_data_files);
+    result.removed_records = get_optional_int(Iceberg::f_deleted_records);
+    result.removed_files_size = get_optional_int(Iceberg::f_removed_files_size);
+    result.removed_position_delete_files = get_optional_int(Iceberg::f_removed_position_delete_files);
+
+    result.total_records = get_optional_int(Iceberg::f_total_records);
+    result.total_files_size = get_optional_int(Iceberg::f_total_files_size);
+    result.total_data_files = get_optional_int(Iceberg::f_total_data_files);
+    result.total_delete_files = get_optional_int(Iceberg::f_total_delete_files);
+    result.total_position_deletes = get_optional_int(Iceberg::f_total_position_deletes);
+    result.total_equality_deletes = get_optional_int(Iceberg::f_total_equality_deletes);
+
+    return result;
+}
 }
 
 #endif

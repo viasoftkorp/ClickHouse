@@ -12,6 +12,7 @@
 #include <Storages/ObjectStorage/DataLakes/Iceberg/IcebergPath.h>
 #include <Storages/ObjectStorage/DataLakes/Iceberg/IcebergTableStateSnapshot.h>
 #include <Storages/ObjectStorage/DataLakes/Iceberg/ManifestFile.h>
+#include <Storages/ObjectStorage/DataLakes/Iceberg/MetadataGenerator.h>
 #include <Storages/ObjectStorage/DataLakes/Iceberg/PersistentTableComponents.h>
 #include <Storages/ObjectStorage/DataLakes/Iceberg/Snapshot.h>
 #include <Storages/PartitionCommands.h>
@@ -103,12 +104,7 @@ private:
     struct DropPlan
     {
         TargetManifests target_manifests;
-        Int64 removed_data_files = 0;
-        Int64 removed_records = 0;
-        Int64 removed_files_size = 0;
-        Int64 removed_position_delete_files = 0;
-        Int64 removed_position_deletes = 0;
-        Int64 changed_partition_count = 0;
+        MetadataGenerator::SnapshotSummary snapshot_summary;
 
         explicit DropPlan(TargetManifests && target_manifests_);
     };

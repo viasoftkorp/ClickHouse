@@ -403,12 +403,11 @@ static bool writeMetadataFiles(
             filename_generator,
             metadata_info.path,
             parent_snapshot,
-            /* added_files */ 0,
-            /* added_records */ 0,
-            total_bytes,
-            /* num_partitions */ total_files,
-            /* added_delete_files */ total_files,
-            total_rows);
+            MetadataGenerator::SnapshotSummary::createOverwrite(
+                /*added_delete_files=*/ total_files,
+                /*added_files_size=*/ total_bytes,
+                /*num_partitions=*/ total_files,
+                /*num_deleted_rows=*/ total_rows));
         new_snapshot = result.snapshot;
         storage_manifest_list_name = path_resolver.resolve(result.manifest_list_path);
     }
@@ -418,12 +417,11 @@ static bool writeMetadataFiles(
             filename_generator,
             metadata_info.path,
             parent_snapshot,
-            /* added_files */ total_files,
-            /* added_records */ total_rows,
-            total_bytes,
-            /* num_partitions */ total_files,
-            /* added_delete_files */ 0,
-            /*num_deleted_rows*/ 0);
+            MetadataGenerator::SnapshotSummary::createAppend(
+                /*added_files=*/ total_files,
+                /*added_records=*/ total_rows,
+                /*added_files_size=*/ total_bytes,
+                /*num_partitions=*/ total_files));
         new_snapshot = result.snapshot;
         storage_manifest_list_name = path_resolver.resolve(result.manifest_list_path);
     }

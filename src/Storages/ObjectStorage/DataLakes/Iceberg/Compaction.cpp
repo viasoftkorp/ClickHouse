@@ -365,12 +365,11 @@ void writeMetadataFiles(
             plan.generator,
             generated_metadata_info.path,
             history_record.parent_id,
-            history_record.added_files,
-            total_records_count,
-            history_record.added_files_size,
-            history_record.num_partitions,
-            0,
-            0,
+            MetadataGenerator::SnapshotSummary::createAppend(
+                /*added_files=*/ history_record.added_files,
+                /*added_records=*/ total_records_count,
+                /*added_files_size=*/ history_record.added_files_size,
+                /*num_partitions=*/ history_record.num_partitions),
             history_record.snapshot_id,
             history_record.made_current_at.value);
 

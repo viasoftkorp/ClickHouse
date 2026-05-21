@@ -28,32 +28,69 @@ public:
         Iceberg::IcebergPathFromMetadata manifest_list_path;
     };
 
+    struct SnapshotSummary
+    {
+        enum class Operation
+        {
+            APPEND,
+            OVERWRITE,
+            DELETE
+        };
+
+        Operation operation;
+
+        Int64 added_files = 0;
+        Int64 added_records = 0;
+        Int64 added_files_size = 0;
+        Int64 num_partitions = 0;
+        Int64 added_delete_files = 0;
+        Int64 num_deleted_rows = 0;
+        Int64 removed_data_files = 0;
+        Int64 removed_records = 0;
+        Int64 removed_files_size = 0;
+        Int64 removed_position_delete_files = 0;
+        Int64 removed_position_deletes = 0;
+
+        Int64 total_records = 0;
+        Int64 total_files_size = 0;
+        Int64 total_data_files = 0;
+        Int64 total_delete_files = 0;
+        Int64 total_position_deletes = 0;
+        Int64 total_equality_deletes = 0;
+
+        void fill(Poco::JSON::Object & obj) const;
+        static SnapshotSummary parse(const Poco::JSON::Object & obj);
+
+        void applyTotalsFromParent(const SnapshotSummary & parent);
+
+        static SnapshotSummary createAppend(
+            Int64 added_files,
+            Int64 added_records,
+            Int64 added_files_size,
+            Int64 num_partitions);
+
+        static SnapshotSummary createOverwrite(
+            Int64 added_delete_files,
+            Int64 added_files_size,
+            Int64 num_partitions,
+            Int64 num_deleted_rows);
+
+        static SnapshotSummary createDelete(
+            Int64 removed_data_files,
+            Int64 removed_records,
+            Int64 removed_files_size,
+            Int64 removed_position_delete_files,
+            Int64 removed_position_deletes,
+            Int64 num_partitions);
+    };
+
     NextMetadataResult generateNextMetadata(
         FileNamesGenerator & generator,
         const Iceberg::IcebergPathFromMetadata & metadata_file_path,
         Int64 parent_snapshot_id,
-        Int64 added_files,
-        Int64 added_records,
-        Int64 added_files_size,
-        Int64 num_partitions,
-        Int64 added_delete_files,
-        Int64 num_deleted_rows,
+        SnapshotSummary snapshot_summary,
         std::optional<Int64> user_defined_snapshot_id = std::nullopt,
         std::optional<Int64> user_defined_timestamp = std::nullopt);
-
-    /// Produce a snapshot for an Iceberg "delete" operation that physically removes
-    /// data files (and optionally position-delete files) from the table. The summary
-    /// reflects removed counts; running totals subtract from the parent rather than add.
-    NextMetadataResult generateNextMetadataForDelete(
-        FileNamesGenerator & generator,
-        const Iceberg::IcebergPathFromMetadata & metadata_file_path,
-        Int64 parent_snapshot_id,
-        Int64 removed_data_files,
-        Int64 removed_records,
-        Int64 removed_files_size,
-        Int64 removed_position_delete_files,
-        Int64 removed_position_deletes,
-        Int64 num_partitions);
 
     void generateAddColumnMetadata(const String & column_name, DataTypePtr type);
     void generateDropColumnMetadata(const String & column_name);

@@ -1113,12 +1113,11 @@ bool IcebergStorageSink::initializeMetadata()
         filename_generator,
         metadata_info.path,
         parent_snapshot,
-        total_data_files,
-        total_rows,
-        total_chunks_size,
-        total_data_files,
-        /* added_delete_files */ 0,
-        /* num_deleted_rows */ 0);
+        MetadataGenerator::SnapshotSummary::createAppend(
+            /*added_files=*/ total_data_files,
+            /*added_records=*/ total_rows,
+            /*added_files_size=*/ total_chunks_size,
+            /*num_partitions=*/ total_data_files));
     auto storage_manifest_list_name = resolver.resolve(manifest_list_path);
 
 
