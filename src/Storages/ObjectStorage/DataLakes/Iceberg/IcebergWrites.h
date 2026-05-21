@@ -128,7 +128,7 @@ void generateManifestListForDelete(
     const std::unordered_set<String> & skip_manifest_paths,
     WriteBuffer & buf);
 
-class IcebergStorageSink : public SinkToStorage
+class IcebergStorageSink final : public SinkToStorage
 {
 public:
     IcebergStorageSink(
