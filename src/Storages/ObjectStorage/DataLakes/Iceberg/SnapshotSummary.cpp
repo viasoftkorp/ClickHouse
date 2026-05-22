@@ -191,7 +191,10 @@ SnapshotSummary SnapshotSummary::fromJSON(const Poco::JSON::Object & obj)
     else if (operation_str == Iceberg::f_delete)
         result.operation = Operation::DELETE;
     else
-        throw DB::Exception(DB::ErrorCodes::BAD_ARGUMENTS, "Unknown snapshot summary operation: {}", operation_str);
+        /// Other Iceberg engines may write operations we don't model (e.g. "replace").
+        /// We don't reject them — `system.iceberg_history` needs to read them, and
+        /// `MetadataGenerator::finalize` only consults parent `total_*` fields.
+        result.operation = Operation::UNKNOWN;
 
     /// Iceberg spec stores all summary metric values as strings (e.g., "120").
     auto get_optional_int = [&](const char * field) -> Int64
