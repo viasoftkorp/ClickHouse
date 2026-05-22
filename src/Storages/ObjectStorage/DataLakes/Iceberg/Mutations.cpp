@@ -403,7 +403,7 @@ static bool writeMetadataFiles(
             filename_generator,
             metadata_info.path,
             parent_snapshot,
-            MetadataGenerator::SnapshotSummary::createOverwrite(
+            Iceberg::SnapshotSummary::createOverwrite(
                 /*added_delete_files=*/ total_files,
                 /*added_files_size=*/ total_bytes,
                 /*num_partitions=*/ total_files,
@@ -417,7 +417,7 @@ static bool writeMetadataFiles(
             filename_generator,
             metadata_info.path,
             parent_snapshot,
-            MetadataGenerator::SnapshotSummary::createAppend(
+            Iceberg::SnapshotSummary::createAppend(
                 /*added_files=*/ total_files,
                 /*added_records=*/ total_rows,
                 /*added_files_size=*/ total_bytes,

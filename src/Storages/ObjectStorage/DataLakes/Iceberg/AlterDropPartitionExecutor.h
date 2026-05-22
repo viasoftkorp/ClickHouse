@@ -104,7 +104,7 @@ private:
     struct DropPlan
     {
         TargetManifests target_manifests;
-        MetadataGenerator::SnapshotSummary snapshot_summary;
+        Iceberg::SnapshotSummary snapshot_summary;
 
         explicit DropPlan(TargetManifests && target_manifests_);
     };

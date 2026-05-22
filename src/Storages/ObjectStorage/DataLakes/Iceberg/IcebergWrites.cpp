@@ -1111,7 +1111,7 @@ bool IcebergStorageSink::initializeMetadata()
         filename_generator,
         metadata_info.path,
         parent_snapshot,
-        MetadataGenerator::SnapshotSummary::createAppend(
+        Iceberg::SnapshotSummary::createAppend(
             /*added_files=*/ total_data_files,
             /*added_records=*/ total_rows,
             /*added_files_size=*/ total_chunks_size,

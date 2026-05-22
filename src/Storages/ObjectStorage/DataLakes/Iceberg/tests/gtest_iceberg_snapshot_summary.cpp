@@ -6,14 +6,14 @@
 
 #include <Common/Exception.h>
 #include <Storages/ObjectStorage/DataLakes/Iceberg/Constant.h>
-#include <Storages/ObjectStorage/DataLakes/Iceberg/MetadataGenerator.h>
+#include <Storages/ObjectStorage/DataLakes/Iceberg/SnapshotSummary.h>
 
 #include <Poco/JSON/Object.h>
 #include <Poco/JSON/Parser.h>
 
 namespace
 {
-using SnapshotSummary = DB::MetadataGenerator::SnapshotSummary;
+using SnapshotSummary = DB::Iceberg::SnapshotSummary;
 using Operation = SnapshotSummary::Operation;
 }
 

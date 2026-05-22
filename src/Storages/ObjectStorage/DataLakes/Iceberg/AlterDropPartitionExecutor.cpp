@@ -428,7 +428,7 @@ AlterDropPartitionExecutor::DropPlan::DropPlan(TargetManifests && target_manifes
     for (const auto & tm : target_manifests.partially_matched)
         apply_entries(tm.entries_to_remove);
 
-    snapshot_summary = MetadataGenerator::SnapshotSummary::createDelete(
+    snapshot_summary = Iceberg::SnapshotSummary::createDelete(
         removed_data_files,
         removed_records,
         removed_files_size,

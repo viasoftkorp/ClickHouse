@@ -366,7 +366,7 @@ void writeMetadataFiles(
             plan.generator,
             generated_metadata_info.path,
             history_record.parent_id,
-            MetadataGenerator::SnapshotSummary::createAppend(
+            Iceberg::SnapshotSummary::createAppend(
                 /*added_files=*/ history_record.added_files,
                 /*added_records=*/ total_records_count,
                 /*added_files_size=*/ history_record.added_files_size,
