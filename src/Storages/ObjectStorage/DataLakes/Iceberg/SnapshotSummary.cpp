@@ -2,7 +2,7 @@
 
 #if USE_AVRO
 
-#include <magic_enum.hpp>
+#include <base/EnumReflection.h>
 
 #include <IO/ReadHelpers.h>
 #include <Common/Exception.h>
@@ -11,7 +11,6 @@
 
 namespace DB::ErrorCodes
 {
-    extern const int BAD_ARGUMENTS;
     extern const int LOGICAL_ERROR;
 }
 
@@ -59,7 +58,7 @@ void SnapshotSummary::finalize(std::optional<SnapshotSummary> parent)
             total_equality_deletes = 0;
             break;
         default:
-            throw DB::Exception(DB::ErrorCodes::LOGICAL_ERROR, "Unexpected operation enum {}", magic_enum::enum_name(operation));
+            throw DB::Exception(DB::ErrorCodes::LOGICAL_ERROR, "Unexpected operation enum {}", operation);
     }
 
     finalized = true;
@@ -123,7 +122,7 @@ Poco::JSON::Object::Ptr SnapshotSummary::toJSON() const
             break;
         }
         default:
-            throw DB::Exception(DB::ErrorCodes::LOGICAL_ERROR, "Unexpected operation enum {}", magic_enum::enum_name(operation));
+            throw DB::Exception(DB::ErrorCodes::LOGICAL_ERROR, "Unexpected operation enum {}", operation);
     }
 
     set_as_string(Iceberg::f_total_records, total_records);

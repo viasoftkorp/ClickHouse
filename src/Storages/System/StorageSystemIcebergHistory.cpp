@@ -26,7 +26,7 @@
 #include <Core/Field.h>
 
 #if USE_AVRO
-#include <magic_enum.hpp>
+#include <base/EnumReflection.h>
 #endif
 
 /// Iceberg specs mention that the timestamps are stored in ms: https://iceberg.apache.org/spec/#table-metadata-fields
@@ -90,7 +90,7 @@ void StorageSystemIcebergHistory::fillData([[maybe_unused]] MutableColumns & res
                     res_columns[column_index++]->insert(iceberg_history_item.is_current_ancestor);
 
                     const auto & snapshot_summary = iceberg_history_item.snapshot_summary;
-                    res_columns[column_index++]->insert(std::string{magic_enum::enum_name(snapshot_summary.operation)});
+                    res_columns[column_index++]->insert(fmt::format("{}", snapshot_summary.operation));
 
                     Map summary_map;
                     if (snapshot_summary.operation != Iceberg::SnapshotSummary::Operation::UNKNOWN)
