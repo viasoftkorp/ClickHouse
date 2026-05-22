@@ -152,7 +152,7 @@ private:
     /// Returns true on a successful commit, false if the CAS race was lost
     /// (the caller should retry). Throws on any other failure. Mutates
     /// state.metadata_object in place via MetadataGenerator.
-    bool tryCommit(SnapshotState & state, const DropPlan & plan);
+    bool tryCommit(SnapshotState & state, DropPlan plan);
 
     /// Sub-step 5a: write a replacement manifest for each partially-matched manifest.
     std::vector<ReplacementManifestWrite> writeReplacementManifests(

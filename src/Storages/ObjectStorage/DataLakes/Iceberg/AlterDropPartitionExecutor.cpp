@@ -385,9 +385,14 @@ AlterDropPartitionExecutor::findTargetManifests(const SnapshotState & state, con
 AlterDropPartitionExecutor::DropPlan::DropPlan(TargetManifests && target_manifests_)
     : target_manifests(std::move(target_manifests_))
 {
-    snapshot_summary.operation = MetadataGenerator::SnapshotSummary::Operation::DELETE;
-
     std::set<Row> changed_partitions;
+
+    Int64 removed_data_files = 0;
+    Int64 removed_records = 0;
+    Int64 removed_files_size = 0;
+    Int64 removed_position_deletes = 0;
+    Int64 removed_position_delete_files = 0;
+
     auto apply_entries = [&](const std::vector<ProcessedManifestFileEntryPtr> & entries)
     {
         for (const auto & entry : entries)
@@ -398,14 +403,14 @@ AlterDropPartitionExecutor::DropPlan::DropPlan(TargetManifests && target_manifes
             switch (parsed_entry.content_type)
             {
                 case FileContentType::DATA:
-                    ++snapshot_summary.removed_data_files;
-                    snapshot_summary.removed_records += parsed_entry.record_count;
-                    snapshot_summary.removed_files_size += parsed_entry.file_size_in_bytes;
+                    ++removed_data_files;
+                    removed_records += parsed_entry.record_count;
+                    removed_files_size += parsed_entry.file_size_in_bytes;
                     break;
                 case FileContentType::POSITION_DELETE:
-                    ++snapshot_summary.removed_position_delete_files;
-                    snapshot_summary.removed_position_deletes += parsed_entry.record_count;
-                    snapshot_summary.removed_files_size += parsed_entry.file_size_in_bytes;
+                    ++removed_position_delete_files;
+                    removed_position_deletes += parsed_entry.record_count;
+                    removed_files_size += parsed_entry.file_size_in_bytes;
                     break;
                 case FileContentType::EQUALITY_DELETE:
                     /// Discovery never matches equality-delete entries, so we
@@ -423,7 +428,13 @@ AlterDropPartitionExecutor::DropPlan::DropPlan(TargetManifests && target_manifes
     for (const auto & tm : target_manifests.partially_matched)
         apply_entries(tm.entries_to_remove);
 
-    snapshot_summary.num_partitions = static_cast<Int64>(changed_partitions.size());
+    snapshot_summary = MetadataGenerator::SnapshotSummary::createDelete(
+        removed_data_files,
+        removed_records,
+        removed_files_size,
+        removed_position_delete_files,
+        removed_position_deletes,
+        /*num_partitions=*/changed_partitions.size());
 }
 
 std::vector<AlterDropPartitionExecutor::ReplacementManifestWrite> AlterDropPartitionExecutor::writeReplacementManifests(
@@ -583,7 +594,7 @@ bool AlterDropPartitionExecutor::commitMetadataJSON(
         data_lake_settings[DataLakeStorageSetting::iceberg_use_version_hint]);
 }
 
-bool AlterDropPartitionExecutor::tryCommit(SnapshotState & state, const DropPlan & plan)
+bool AlterDropPartitionExecutor::tryCommit(SnapshotState & state, DropPlan plan)
 {
     FileNamesGenerator filename_generator(
         components.path_resolver.getTableLocation(), false, components.metadata_compression_method, write_format);
@@ -662,7 +673,7 @@ void AlterDropPartitionExecutor::run()
 
         DropPlan plan{findTargetManifests(state, targets)};
 
-        if (tryCommit(state, plan))
+        if (tryCommit(state, std::move(plan)))
             return;
     }
 

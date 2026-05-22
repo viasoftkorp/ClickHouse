@@ -6,6 +6,7 @@
 #include <DataTypes/IDataType.h>
 #include <Storages/ObjectStorage/DataLakes/Iceberg/FileNamesGenerator.h>
 #include <Storages/ObjectStorage/DataLakes/Iceberg/IcebergPath.h>
+#include <Storages/ObjectStorage/DataLakes/Iceberg/ManifestFile.h>
 #include <Poco/JSON/Object.h>
 
 
@@ -58,10 +59,13 @@ public:
         Int64 total_position_deletes = 0;
         Int64 total_equality_deletes = 0;
 
-        void fill(Poco::JSON::Object & obj) const;
-        static SnapshotSummary parse(const Poco::JSON::Object & obj);
+        bool finalized = false;
 
-        void applyTotalsFromParent(const SnapshotSummary & parent);
+        void finalize(std::optional<SnapshotSummary> parent);
+
+        Poco::JSON::Object::Ptr toJSON() const;
+
+        static SnapshotSummary fromJSON(const Poco::JSON::Object & obj);
 
         static SnapshotSummary createAppend(
             Int64 added_files,

@@ -1,14 +1,13 @@
 #include <IO/ReadHelpers.h>
 #include <Storages/ObjectStorage/DataLakes/Iceberg/MetadataGenerator.h>
 
-#include <climits>
-#include <string_view>
-#include <type_traits>
+#include <optional>
 #include <Poco/JSON/Array.h>
 #include <Poco/JSON/Object.h>
 #include <Poco/JSON/Stringifier.h>
 #include <Poco/JSON/Parser.h>
 
+#include <Common/Exception.h>
 #include <Common/randomSeed.h>
 
 #include <Storages/ObjectStorage/DataLakes/Iceberg/Constant.h>
@@ -141,14 +140,22 @@ MetadataGenerator::NextMetadataResult MetadataGenerator::generateNextMetadata(
     new_snapshot->set(Iceberg::f_timestamp_ms, timestamp);
     metadata_object->set(Iceberg::f_last_updated_ms, timestamp);
 
+    std::optional<SnapshotSummary> parent_snapshot_summary;
     if (auto parent_snapshot = getParentSnapshot(parent_snapshot_id))
-        snapshot_summary.applyTotalsFromParent(SnapshotSummary::parse(*parent_snapshot));
+    {
+        auto parent_summary = parent_snapshot->getObject(Iceberg::f_summary);
+        if (!parent_summary)
+            throw Exception(
+                DB::ErrorCodes::BAD_ARGUMENTS,
+                "Iceberg manifest {} missing summary in snapshot {}",
+                metadata_file_path,
+                parent_snapshot_id
+            );
+        parent_snapshot_summary = SnapshotSummary::fromJSON(*parent_summary);
+    }
+    snapshot_summary.finalize(std::move(parent_snapshot_summary));
 
-    Poco::JSON::Object::Ptr summary = new Poco::JSON::Object;
-
-    snapshot_summary.fill(*summary);
-
-    new_snapshot->set(Iceberg::f_summary, summary);
+    new_snapshot->set(Iceberg::f_summary, snapshot_summary.toJSON());
 
     new_snapshot->set(Iceberg::f_schema_id, metadata_object->getValue<Int32>(Iceberg::f_current_schema_id));
     new_snapshot->set(Iceberg::f_manifest_list, manifest_list_path.serialize());
@@ -159,8 +166,8 @@ MetadataGenerator::NextMetadataResult MetadataGenerator::generateNextMetadata(
             ? metadata_object->getValue<Int64>(Iceberg::f_next_row_id)
             : 0;
         new_snapshot->set(Iceberg::f_first_row_id, next_row_id);
-        new_snapshot->set(Iceberg::f_added_rows, added_records);
-        metadata_object->set(Iceberg::f_next_row_id, next_row_id + added_records);
+        new_snapshot->set(Iceberg::f_added_rows, snapshot_summary.added_records);
+        metadata_object->set(Iceberg::f_next_row_id, next_row_id + snapshot_summary.added_records);
     }
 
     metadata_object->getArray(Iceberg::f_snapshots)->add(new_snapshot);
@@ -374,46 +381,76 @@ void MetadataGenerator::generateRenameColumnMetadata(const String & column_name,
     metadata_object->getArray(Iceberg::f_schemas)->add(current_schema);
 }
 
-void MetadataGenerator::SnapshotSummary::applyTotalsFromParent(const SnapshotSummary & parent)
+void MetadataGenerator::SnapshotSummary::finalize(std::optional<SnapshotSummary> parent)
 {
+    if (finalized)
+        throw DB::Exception(
+            DB::ErrorCodes::LOGICAL_ERROR,
+            "SnapshotSummary::finalize called twice -- totals would be double-applied");
+
+    if (parent)
+    {
+        total_records = parent->total_records;
+        total_files_size = parent->total_files_size;
+        total_data_files = parent->total_data_files;
+        total_delete_files = parent->total_delete_files;
+        total_position_deletes = parent->total_position_deletes;
+        total_equality_deletes = parent->total_equality_deletes;
+    }
+    else if (operation == Operation::DELETE || operation == Operation::OVERWRITE)
+        throw DB::Exception(DB::ErrorCodes::LOGICAL_ERROR, "No parent snapshot for DELETE/OVERWRITE");
+
     switch (operation)
     {
         case Operation::APPEND:
         case Operation::OVERWRITE:
-            total_records = parent.total_records + added_records;
-            total_files_size = parent.total_files_size + added_files_size;
-            total_data_files = parent.total_data_files + added_files;
-            total_delete_files = parent.total_delete_files + added_delete_files;
-            total_position_deletes = parent.total_position_deletes + num_deleted_rows;
-            total_equality_deletes = parent.total_equality_deletes;
+            total_records += added_records;
+            total_files_size += added_files_size;
+            total_data_files += added_files;
+            total_delete_files += added_delete_files;
+            /// FIXME: this is correct only while we don't support equality deletes
+            total_position_deletes += num_deleted_rows;
+            total_equality_deletes = 0;
             break;
         case Operation::DELETE:
-            total_records = parent.total_records - removed_records;
-            total_files_size = parent.total_files_size - removed_files_size;
-            total_data_files = parent.total_data_files - removed_data_files;
-            total_delete_files = parent.total_delete_files - removed_position_delete_files;
-            total_position_deletes = parent.total_position_deletes - removed_position_deletes;
-            total_equality_deletes = parent.total_equality_deletes;
+            total_records -= removed_records;
+            total_files_size -= removed_files_size;
+            total_data_files -= removed_data_files;
+            total_delete_files -= removed_position_delete_files;
+            /// FIXME: this is correct only while we don't support equality deletes
+            total_position_deletes -= removed_position_deletes;
+            total_equality_deletes = 0;
             break;
     }
+
+    finalized = true;
 }
 
-void MetadataGenerator::SnapshotSummary::fill(Poco::JSON::Object & obj) const
+Poco::JSON::Object::Ptr MetadataGenerator::SnapshotSummary::toJSON() const
 {
+    if (!finalized)
+        throw DB::Exception(DB::ErrorCodes::LOGICAL_ERROR, "SnapshotSummary wasn't finalized");
+
+    Poco::JSON::Object::Ptr obj = new Poco::JSON::Object;
+
     /// https://iceberg.apache.org/spec/?h=summary#optional-snapshot-summary-fields
     /// Snapshot summary can include metrics fields to track numeric stats of the snapshot (see Metrics) and operational details (see Other Fields).
     /// The value of these fields should be of string type (e.g., "120").
     auto set_as_string = [&](const char * field, Int64 val)
     {
-        obj.set(field, std::to_string(val));
+        obj->set(field, std::to_string(val));
     };
 
     switch (operation)
     {
         case Operation::APPEND:
         {
-            chassert(num_deleted_rows == 0);
-            obj.set(Iceberg::f_operation, Iceberg::f_append);
+            if (num_deleted_rows != 0)
+                throw DB::Exception(
+                    DB::ErrorCodes::LOGICAL_ERROR,
+                    "SnapshotSummary with operation=APPEND must have num_deleted_rows=0, got {}",
+                    num_deleted_rows);
+            obj->set(Iceberg::f_operation, Iceberg::f_append);
             set_as_string(Iceberg::f_added_data_files, added_files);
             set_as_string(Iceberg::f_added_records, added_records);
             set_as_string(Iceberg::f_added_files_size, added_files_size);
@@ -422,8 +459,11 @@ void MetadataGenerator::SnapshotSummary::fill(Poco::JSON::Object & obj) const
         }
         case Operation::OVERWRITE:
         {
-            chassert(num_deleted_rows != 0);
-            obj.set(Iceberg::f_operation, Iceberg::f_overwrite);
+            if (num_deleted_rows == 0)
+                throw DB::Exception(
+                    DB::ErrorCodes::LOGICAL_ERROR,
+                    "SnapshotSummary with operation=OVERWRITE must have num_deleted_rows>0, got 0");
+            obj->set(Iceberg::f_operation, Iceberg::f_overwrite);
             set_as_string(Iceberg::f_added_delete_files, added_delete_files);
             set_as_string(Iceberg::f_added_position_delete_files, added_delete_files);
             set_as_string(Iceberg::f_added_files_size, added_files_size);
@@ -433,7 +473,7 @@ void MetadataGenerator::SnapshotSummary::fill(Poco::JSON::Object & obj) const
         }
         case Operation::DELETE:
         {
-            obj.set(Iceberg::f_operation, Iceberg::f_delete);
+            obj->set(Iceberg::f_operation, Iceberg::f_delete);
             set_as_string(Iceberg::f_removed_data_files, removed_data_files);
             set_as_string(Iceberg::f_deleted_data_files, removed_data_files);
             set_as_string(Iceberg::f_deleted_records, removed_records);
@@ -451,6 +491,8 @@ void MetadataGenerator::SnapshotSummary::fill(Poco::JSON::Object & obj) const
     set_as_string(Iceberg::f_total_delete_files, total_delete_files);
     set_as_string(Iceberg::f_total_position_deletes, total_position_deletes);
     set_as_string(Iceberg::f_total_equality_deletes, total_equality_deletes);
+
+    return obj;
 }
 
 MetadataGenerator::SnapshotSummary MetadataGenerator::SnapshotSummary::createAppend(
@@ -496,7 +538,7 @@ MetadataGenerator::SnapshotSummary MetadataGenerator::SnapshotSummary::createDel
     return result;
 }
 
-MetadataGenerator::SnapshotSummary MetadataGenerator::SnapshotSummary::parse(const Poco::JSON::Object & obj)
+MetadataGenerator::SnapshotSummary MetadataGenerator::SnapshotSummary::fromJSON(const Poco::JSON::Object & obj)
 {
     SnapshotSummary result;
 
