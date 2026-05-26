@@ -1,14 +1,11 @@
-#include <functional>
 #include <unordered_map>
 #include <Processors/QueryPlan/Optimizations/Optimizations.h>
 
 #include <Core/Joins.h>
 #include <IO/WriteHelpers.h>
-#include <Interpreters/ActionsDAG.h>
 #include <Interpreters/IJoin.h>
 #include <Interpreters/SetSerialization.h>
 #include <Interpreters/TableJoin.h>
-#include <Processors/QueryPlan/FilterStep.h>
 #include <Processors/QueryPlan/ITransformingStep.h>
 #include <Processors/QueryPlan/JoinStep.h>
 #include <Processors/QueryPlan/JoinStepLogical.h>
@@ -17,7 +14,6 @@
 #include <Processors/QueryPlan/SourceStepWithFilter.h>
 #include <Storages/IStorage.h>
 #include <Common/SipHash.h>
-#include <Common/logger_useful.h>
 
 using namespace DB;
 
@@ -48,7 +44,6 @@ UInt64 calculateHashFromStep(const SourceStepWithFilter & read)
     }
     if (const auto & dag = read.getPrewhereInfo())
         dag->prewhere_actions.updateHash(hash);
-    // EXPERIMENT: runtime-filter-aware prewhere hashing disabled.
     return hash.get64();
 }
 
@@ -58,8 +53,6 @@ UInt64 calculateHashFromStep(const ITransformingStep & transform)
     // Steps that preserve the number of input rows do not affect cardinality, so we can skip them.
     if (transform.getTransformTraits().preserves_number_of_rows)
         return 0;
-
-    // EXPERIMENT: runtime-filter `FilterStep` early-return disabled.
 
     WriteBufferFromOwnString wbuf;
     SerializedSetsRegistry registry;
@@ -223,23 +216,13 @@ void calculateHashTableCacheKeys(
 
         /// Any transforming step that preserves the number of rows carries no cost-relevant
         /// information for `HashTablesStatistics` — it's pure column-level rewriting. Make those
-        /// steps fully transparent so that structural differences between the two plan builds
-        /// that only add/remove such steps (e.g. a probe-side `Filter(__applyFilter)` vs a
-        /// build-side `Expression(Change col)` + `BuildRuntimeFilter`) collapse to the same
-        /// subtree cache key on both sides of a DP join swap.
+        /// steps fully transparent so the cache key is taken from the upstream step that
+        /// actually changed cardinality.
         if (const auto * transform = dynamic_cast<const ITransformingStep *>(node.step.get()))
         {
             chassert(node.children.size() == 1);
-            // EXPERIMENT: runtime-filter `FilterStep` transparency disabled.
             if (transform->getTransformTraits().preserves_number_of_rows)
                 cache_keys[&node] = cache_keys[node.children.front()];
-        }
-
-        {
-            std::string child_str;
-            for (const auto * c : node.children)
-                child_str += fmt::format(" c={}", cache_keys[c]);
-            LOG_DEBUG(getLogger("hk"), "{}{} -> {}", node.step->getName(), child_str, cache_keys[&node]);
         }
 
         stack.pop_back();
