@@ -12,6 +12,7 @@
 #include <Core/ServerSettings.h>
 #include <Common/ProxyConfigurationResolverProvider.h>
 #include <IO/AzureBlobStorage/PocoHTTPClient.h>
+#include <IO/AzureBlobStorage/isRetryableAzureException.h>
 #include <Common/Exception.h>
 #include <Common/ProfileEvents.h>
 #include <Common/re2.h>
@@ -153,12 +154,14 @@ BlockBlobClient ContainerClientWrapper::GetBlockBlobClient(const String & blob_n
     return client.GetBlockBlobClient(blob_prefix + blob_name);
 }
 
+/// TODO: move to private if only used via wrapper - error handling for this method is not implemented
 BlobContainerPropertiesRespones ContainerClientWrapper::GetProperties() const
 {
     return client.GetProperties();
 }
 
 ListBlobsPagedResponse ContainerClientWrapper::ListBlobs(const ListBlobsOptions & options) const
+try
 {
     auto new_options = options;
     new_options.Prefix = blob_prefix + options.Prefix.ValueOr("");
@@ -174,6 +177,10 @@ ListBlobsPagedResponse ContainerClientWrapper::ListBlobs(const ListBlobsOptions 
     }
 
     return response;
+}
+catch (const Azure::Storage::StorageException & e)
+{
+    rethrowAzureException(e, blob_prefix);
 }
 
 bool ContainerClientWrapper::IsClientForDisk() const
@@ -330,7 +337,7 @@ static bool containerExists(const ContainerClient & client)
             return true;
         }
 
-        throw;
+        rethrowAzureException(e, "Azure container");
     }
 }
 
@@ -368,7 +375,7 @@ std::unique_ptr<ContainerClient> getContainerClient(const ConnectionParams & par
         /// To avoid race with creation of container, handle this error despite that we have already checked the existence of container.
         if (!params.endpoint.container_already_exists.has_value() && e.StatusCode == Azure::Core::Http::HttpStatusCode::Conflict)
             return params.createForContainer();
-        throw;
+        rethrowAzureException(e, params.endpoint.container_name);
     }
 }
 

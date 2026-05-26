@@ -8,6 +8,7 @@
 #include <Common/NetException.h>
 #include <Common/Throttler.h>
 #include <Common/logger_useful.h>
+#include <Common/FailPoint.h>
 #include <IO/WriteBufferFromString.h>
 #include <IO/Operators.h>
 #include <IO/ConnectionTimeouts.h>
@@ -16,6 +17,7 @@
 #include <Poco/Net/HTTPClientSession.h>
 #include <Poco/URI.h>
 #include <azure/core/http/policies/policy.hpp>
+#include <azure/storage/common/storage_exception.hpp>
 
 
 namespace DB::ErrorCodes
@@ -23,6 +25,11 @@ namespace DB::ErrorCodes
     extern const int TOO_MANY_REDIRECTS;
     extern const int NOT_IMPLEMENTED;
     extern const int BAD_ARGUMENTS;
+}
+
+namespace DB::FailPoints
+{
+    extern const char azure_inject_forbidden_response[];
 }
 
 namespace ProfileEvents
@@ -135,6 +142,16 @@ std::unique_ptr<Azure::Core::Http::RawResponse> PocoAzureHTTPClient::Send(
     Azure::Core::Http::Request & request,
     Azure::Core::Context const & context)
 {
+    /// TODO: check whether this failpoint is needed as REGULAR or could be ONCE
+    fiu_do_on(DB::FailPoints::azure_inject_forbidden_response,
+    {
+        throw Azure::Storage::StorageException::CreateFromResponse(
+            std::make_unique<Azure::Core::Http::RawResponse>(
+                1, 0,
+                Azure::Core::Http::HttpStatusCode::Forbidden,
+                "Forbidden (injected by failpoint)"));
+    });
+
     CurrentMetrics::Increment metric_increment{CurrentMetrics::AzureRequests};
 
     size_t redirects_left = max_redirects;

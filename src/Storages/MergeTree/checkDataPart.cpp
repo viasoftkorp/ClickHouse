@@ -53,6 +53,7 @@ namespace ErrorCodes
     extern const int ABORTED;
     extern const int CANNOT_WRITE_TO_OSTREAM;
     extern const int CACHE_CANNOT_WRITE_TO_CACHE_DISK;
+    extern const int PATH_ACCESS_DENIED;
 }
 
 
@@ -112,7 +113,9 @@ bool isRetryableException(std::exception_ptr exception_ptr)
             || e.code() == ErrorCodes::CANNOT_SCHEDULE_TASK
             || e.code() == ErrorCodes::ABORTED
             || e.code() == ErrorCodes::CANNOT_WRITE_TO_OSTREAM
-            || e.code() == ErrorCodes::CACHE_CANNOT_WRITE_TO_CACHE_DISK;
+            || e.code() == ErrorCodes::CACHE_CANNOT_WRITE_TO_CACHE_DISK
+            /// TODO: why here? how we could end up here bypassing Azure::Core::RequestFailedException branch?
+            || e.code() == ErrorCodes::PATH_ACCESS_DENIED;
     }
     catch (const std::filesystem::filesystem_error & e)
     {

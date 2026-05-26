@@ -127,7 +127,7 @@ void WriteBufferFromAzureBlobStorage::execWithRetry(std::function<void(size_t)> 
         catch (const Azure::Core::RequestFailedException & e)
         {
             if (i == num_tries - 1 || !isRetryableAzureException(e))
-                throw;
+                rethrowAzureException(e, blob_path);
 
             LOG_DEBUG(log, "Write at attempt {} for blob `{}` failed: {} {}", i + 1, blob_path, e.what(), e.Message);
             sleepForMilliseconds(sleep_time_with_backoff_milliseconds);
@@ -392,7 +392,7 @@ void WriteBufferFromAzureBlobStorage::finalizeImpl()
                         ErrorCodes::AZURE_BLOB_STORAGE_ERROR,
                         "Object {} not uploaded to azure blob storage, it's a bug in Azure Blob Storage or its API.",
                         blob_path);
-            throw;
+            rethrowAzureException(e, blob_path);
         }
     }
 }

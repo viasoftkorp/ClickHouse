@@ -15,6 +15,7 @@
 #include <Disks/IO/ReadBufferFromRemoteFSGather.h>
 #include <Disks/IO/AsynchronousBoundedReadBuffer.h>
 #include <IO/AzureBlobStorage/copyAzureBlobStorageFile.h>
+#include <IO/AzureBlobStorage/isRetryableAzureException.h>
 
 
 #include <IO/WriteBufferFromString.h>
@@ -164,7 +165,7 @@ bool AzureObjectStorage::exists(const StoredObject & object) const
     {
         if (e.StatusCode == Azure::Core::Http::HttpStatusCode::NotFound)
             return false;
-        throw;
+        rethrowAzureException(e, object.remote_path);
     }
 }
 
@@ -342,7 +343,7 @@ void AzureObjectStorage::removeObjectImpl(
                     watch.elapsedMicroseconds(),
                     error_code,
                     error_message);
-            throw;
+            rethrowAzureException(e, path);
         }
 
         /// If object doesn't exist.
@@ -363,7 +364,7 @@ void AzureObjectStorage::removeObjectImpl(
         }
 
         tryLogCurrentException(__PRETTY_FUNCTION__);
-        throw;
+        rethrowAzureException(e, path);
     }
     auto elapsed = watch.elapsedMicroseconds();
 
@@ -450,6 +451,12 @@ void AzureObjectStorage::removeObjectsBatchIfExists(
                 {
                     add_log_entry(object, avg_elapsed_us, static_cast<Int32>(e.StatusCode), e.Message);
 
+                    /// Fail fast on 403: the rest of the batch will hit the same 403.
+                    /// TODO: check logic here
+                    if (isAzureForbiddenException(e))
+                        rethrowAzureException(e, object.remote_path);
+
+                    /// TODO: check logic here - trace thoroughly where it's thrown
                     if (!throw_at_end)
                         throw_at_end = std::current_exception();
 
@@ -479,6 +486,7 @@ static void setAzureBlobTag(
     const Strings & blob_names,
     const String & tag_key,
     const String & tag_value)
+try
 {
     auto log = getLogger("setAzureBlobTag");
     for (const auto & blob_name : blob_names)
@@ -498,6 +506,10 @@ static void setAzureBlobTag(
         LOG_TRACE(log, "Tags of Azure blob {} updated", blob_name);
     }
 }
+catch (const Azure::Storage::StorageException & e)
+{
+    rethrowAzureException(e, tag_key);
+}
 
 void AzureObjectStorage::tagObjects(const StoredObjects & objects, const std::string & tag_key, const std::string & tag_value)
 {
@@ -507,6 +519,7 @@ void AzureObjectStorage::tagObjects(const StoredObjects & objects, const std::st
 }
 
 ObjectMetadata AzureObjectStorage::getObjectMetadata(const std::string & path, bool) const
+try
 {
     auto client_ptr = client.get();
     auto blob_client = client_ptr->GetBlobClient(path);
@@ -526,6 +539,10 @@ ObjectMetadata AzureObjectStorage::getObjectMetadata(const std::string & path, b
     }
     result.last_modified = static_cast<std::chrono::system_clock::time_point>(properties.LastModified).time_since_epoch().count();
     return result;
+}
+catch (const Azure::Storage::StorageException & e)
+{
+    rethrowAzureException(e, path);
 }
 
 std::optional<ObjectMetadata> AzureObjectStorage::tryGetObjectMetadata(const std::string & path, bool with_tags) const

@@ -129,13 +129,14 @@ bool ReadBufferFromAzureBlobStorage::nextImpl()
                 read_settings.remote_throttler->throttle(bytes_read);
             break;
         }
+        /// TODO: why we can't use analogue of execWithRetry here?
         catch (const Azure::Core::RequestFailedException & e)
         {
             ProfileEvents::increment(ProfileEvents::ReadBufferFromAzureRequestsErrors);
             LOG_DEBUG(log, "Exception caught during Azure Read for file {} at attempt {}/{}: {}", path, i + 1, max_single_read_retries, e.Message);
 
             if (i + 1 == max_single_read_retries || !isRetryableAzureException(e))
-                throw;
+                rethrowAzureException(e, path);
 
             sleepForMilliseconds(sleep_time_with_backoff_milliseconds);
             sleep_time_with_backoff_milliseconds *= 2;
@@ -294,7 +295,7 @@ void ReadBufferFromAzureBlobStorage::initialize(size_t attempt)
             LOG_DEBUG(log, "Exception caught during Azure Download for file {} at offset {} at attempt {}/{}: {}", path, offset, i + 1, max_single_download_retries, e.Message);
 
             if (i + 1 == max_single_download_retries || !isRetryableAzureException(e))
-                throw;
+                rethrowAzureException(e, path);
 
             sleepForMilliseconds(sleep_time_with_backoff_milliseconds);
             sleep_time_with_backoff_milliseconds *= 2;
@@ -408,7 +409,7 @@ size_t ReadBufferFromAzureBlobStorage::readBigAt(char * to, size_t n, size_t ran
             LOG_DEBUG(log, "Exception caught during Azure Download for file {} at offset {} at attempt {}/{}: {}", path, offset, i + 1, max_single_download_retries, e.Message);
 
             if (i + 1 == max_single_download_retries || !isRetryableAzureException(e))
-                throw;
+                rethrowAzureException(e, path);
 
             sleepForMilliseconds(sleep_time_with_backoff_milliseconds);
             sleep_time_with_backoff_milliseconds *= 2;
