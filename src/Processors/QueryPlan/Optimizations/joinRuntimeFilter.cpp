@@ -14,6 +14,7 @@
 #include <Core/Settings.h>
 #include <Common/Exception.h>
 #include <Common/SipHash.h>
+#include <Common/thread_local_rng.h>
 #include <Common/logger_useful.h>
 #include <DataTypes/DataTypeTuple.h>
 #include <Functions/tuple.h>
@@ -217,15 +218,7 @@ bool tryAddJoinRuntimeFilter(QueryPlan::Node & node, QueryPlan::Nodes & nodes, c
             total_join_on_predicates_count, join_keys_probe_side.size(), join_keys_build_side.size());
     }
 
-    /// Derive a stable fingerprint of this runtime filter from the join's structural properties.
-    /// Must be deterministic so that when the same query plan is built more than once (for example
-    /// by `considerEnablingParallelReplicas`, which constructs a separate parallel-replicas plan in
-    /// parallel to the local one), both builds produce the same filter name. Otherwise downstream
-    /// `Filter` steps embed different filter names in their `__applyFilter(...)` actions and hash
-    /// to different keys, preventing plan-node matching.
-    ///
-    /// Uniqueness across joins in the same plan is preserved because different joins differ in at
-    /// least one of the signature components hashed below.
+    // EXPERIMENT phase 2: deterministic naming restored; prewhere/FilterStep transparency still off.
     SipHash filter_name_hash;
     filter_name_hash.update(join_step->getSerializationName());
     filter_name_hash.update(static_cast<uint8_t>(join_operator.kind));

@@ -47,73 +47,8 @@ UInt64 calculateHashFromStep(const SourceStepWithFilter & read)
         table_name = storage_id.getFullTableName();
     }
     if (const auto & dag = read.getPrewhereInfo())
-    {
-        /// Hash the filter-expression subtree only (rooted at `prewhere_column_name`), and strip
-        /// `__applyFilter(_runtime_filter_*, ...)` contributions along the way. The runtime filter
-        /// is pushed into the prewhere only on the probe side of a JOIN, so its presence depends on
-        /// which join side the DP optimizer happened to route this table to. The underlying storage
-        /// read is the same either way — see the matching transparency treatment in the
-        /// `FilterStep` path below.
-        ///
-        /// We hash only the filter subtree rather than the whole `prewhere_actions` DAG because the
-        /// DAG's output list also carries pass-through columns that the downstream plan consumes;
-        /// those pass-through outputs differ between the two plan builds exactly because the probe
-        /// side's filter DAG has to propagate its extra input through to the downstream JOIN.
-        /// Hashing just the filter expression sidesteps that bookkeeping and captures the
-        /// cost-relevant part of the prewhere.
-        auto is_runtime_filter = [](const ActionsDAG::Node * n)
-        {
-            return n && n->type == ActionsDAG::ActionType::FUNCTION && n->function_base
-                && n->function_base->getName() == "__applyFilter";
-        };
-        std::function<void(const ActionsDAG::Node *, SipHash &)> hash_filter_expr
-            = [&](const ActionsDAG::Node * node, SipHash & h)
-        {
-            if (is_runtime_filter(node))
-                return;
-
-            /// `and(..., __applyFilter(...), ...)` simplifies to the AND of the remaining
-            /// conditions; if only one non-runtime-filter child is left, the AND collapses to that
-            /// child; if none are left, the filter becomes trivially true and we emit nothing.
-            if (node->type == ActionsDAG::ActionType::FUNCTION && node->function_base
-                && node->function_base->getName() == "and")
-            {
-                std::vector<const ActionsDAG::Node *> survivors;
-                survivors.reserve(node->children.size());
-                for (const auto * child : node->children)
-                    if (!is_runtime_filter(child))
-                        survivors.push_back(child);
-
-                if (survivors.empty())
-                    return;
-                if (survivors.size() == 1)
-                {
-                    hash_filter_expr(survivors.front(), h);
-                    return;
-                }
-                h.update(uint8_t(node->type));
-                h.update(node->function_base->getName());
-                for (const auto * child : survivors)
-                    hash_filter_expr(child, h);
-                return;
-            }
-
-            h.update(uint8_t(node->type));
-            h.update(node->result_name);
-            if (node->result_type)
-                h.update(node->result_type->getName());
-            if (node->function_base)
-                h.update(node->function_base->getName());
-            if (node->column)
-                h.update(node->column->getName());
-            for (const auto * child : node->children)
-                hash_filter_expr(child, h);
-        };
-
-        const auto * filter_root = dag->prewhere_actions.tryFindInOutputs(dag->prewhere_column_name);
-        if (filter_root)
-            hash_filter_expr(filter_root, hash);
-    }
+        dag->prewhere_actions.updateHash(hash);
+    // EXPERIMENT: runtime-filter-aware prewhere hashing disabled.
     return hash.get64();
 }
 
@@ -124,21 +59,7 @@ UInt64 calculateHashFromStep(const ITransformingStep & transform)
     if (transform.getTransformTraits().preserves_number_of_rows)
         return 0;
 
-    /// Runtime-join-filter `FilterStep`s (where the only output is `__applyFilter(runtime_filter_*,
-    /// ...)`) are moved between children of a `JoinStep` when the DP optimizer swaps sides. They
-    /// carry no information that differentiates two plans — just a bloom-filter test on a join key
-    /// — so from hashing's perspective they are equivalent to an `ExpressionStep` doing the same
-    /// column aliasing. Treat them the same way `ExpressionStep` is treated (contribute nothing to
-    /// the parent hash) so that a subtree on one side of the JOIN in one plan matches the
-    /// equivalent subtree on the opposite side of the JOIN in the other plan.
-    if (const auto * filter = typeid_cast<const FilterStep *>(&transform))
-    {
-        const auto & dag = filter->getExpression();
-        const auto * filter_node = dag.tryFindInOutputs(filter->getFilterColumnName());
-        if (filter_node && filter_node->type == ActionsDAG::ActionType::FUNCTION && filter_node->function_base
-            && filter_node->function_base->getName() == "__applyFilter")
-            return 0;
-    }
+    // EXPERIMENT: runtime-filter `FilterStep` early-return disabled.
 
     WriteBufferFromOwnString wbuf;
     SerializedSetsRegistry registry;
@@ -309,16 +230,8 @@ void calculateHashTableCacheKeys(
         if (const auto * transform = dynamic_cast<const ITransformingStep *>(node.step.get()))
         {
             chassert(node.children.size() == 1);
-            const bool is_runtime_filter = [&]
-            {
-                const auto * filter = typeid_cast<const FilterStep *>(node.step.get());
-                if (!filter)
-                    return false;
-                const auto * filter_node = filter->getExpression().tryFindInOutputs(filter->getFilterColumnName());
-                return filter_node && filter_node->type == ActionsDAG::ActionType::FUNCTION && filter_node->function_base
-                    && filter_node->function_base->getName() == "__applyFilter";
-            }();
-            if (transform->getTransformTraits().preserves_number_of_rows || is_runtime_filter)
+            // EXPERIMENT: runtime-filter `FilterStep` transparency disabled.
+            if (transform->getTransformTraits().preserves_number_of_rows)
                 cache_keys[&node] = cache_keys[node.children.front()];
         }
 
