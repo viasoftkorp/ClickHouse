@@ -214,17 +214,6 @@ void calculateHashTableCacheKeys(
         raw_hashes[&node] = raw;
         cache_keys[&node] = raw;
 
-        /// Any transforming step that preserves the number of rows carries no cost-relevant
-        /// information for `HashTablesStatistics` — it's pure column-level rewriting. Make those
-        /// steps fully transparent so the cache key is taken from the upstream step that
-        /// actually changed cardinality.
-        if (const auto * transform = dynamic_cast<const ITransformingStep *>(node.step.get()))
-        {
-            chassert(node.children.size() == 1);
-            if (transform->getTransformTraits().preserves_number_of_rows)
-                cache_keys[&node] = cache_keys[node.children.front()];
-        }
-
         stack.pop_back();
     }
 }
