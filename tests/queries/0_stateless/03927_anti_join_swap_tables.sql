@@ -1,5 +1,6 @@
 -- Test for swapping the build and probe sides of a ANTI join
 
+SET query_plan_optimize_join_order_randomize = 0; -- Pinned because the test asserts on join plan/order
 CREATE TABLE lhs(a UInt32)
 ENGINE = MergeTree
 ORDER BY tuple();

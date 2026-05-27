@@ -1,3 +1,4 @@
+SET query_plan_optimize_join_order_randomize = 0; -- Pinned because the test asserts on join plan/order
 #!/usr/bin/env -S ${HOME}/clickhouse-client --queries-file
 
 DROP TABLE IF EXISTS t1;
