@@ -15,12 +15,12 @@ SET max_bytes_before_external_sort=0, max_bytes_ratio_before_external_sort=0;
 -- Override randomized max_threads to avoid timeout on slow builds (ASan)
 SET max_threads=0;
 
--- `AggregatingStep::supportsDataflowStatisticsCollection` returns `false` when
--- `sort_description_for_merging` is populated, which happens under
--- `optimize_aggregation_in_order=1`. That makes the plan-simplicity check in
--- `considerEnablingParallelReplicas` bail and no statistics are collected for the GROUP BY
--- query. Pin the setting off so the randomizer doesn't silently drop autopr here.
-SET optimize_aggregation_in_order=0;
+-- The stateless-test randomizer flips `query_plan_join_swap_table` between `'auto'` and `'false'`,
+-- which can move which side of an INNER/RIGHT join becomes the parallelized one. The queries
+-- below assume the user-written orientation reaches `findReadingStep`; pin the setting off so
+-- the legacy swap doesn't reorient us out of that. Individual queries override locally when they
+-- specifically want to exercise the swap (e.g. `04103_query_6`).
+SET query_plan_join_swap_table='false';
 
 set enable_filesystem_cache=1;
 
@@ -32,7 +32,9 @@ SET parallel_replicas_prefer_local_join=1;
 -- even when the estimate itself is correct. A minimal right side keeps the two quantities
 -- directly comparable.
 DROP TABLE IF EXISTS autopr_join_right_small;
+DROP TABLE IF EXISTS autopr_join_right_small_2;
 CREATE TABLE autopr_join_right_small (UserID UInt64) ENGINE = MergeTree ORDER BY UserID AS SELECT number FROM numbers(1000);
+CREATE TABLE autopr_join_right_small_2 (UserID UInt64) ENGINE = MergeTree ORDER BY UserID AS SELECT number FROM numbers(1000);
 
 -- `INNER JOIN` of `test.hits` with the tiny right-side table.
 -- With `parallel_replicas_prefer_local_join=1`, the left side is the parallelized side, so the
@@ -64,7 +66,19 @@ SELECT count() FROM autopr_join_right_small AS t1 RIGHT JOIN test.hits AS t2 USI
 -- statistics directly comparable to `ReadCompressedBytes`.
 SELECT count() FROM autopr_join_right_small AS t1 INNER JOIN test.hits AS t2 USING (UserID) FORMAT Null SETTINGS log_comment='04103_query_6', query_plan_join_swap_table='true', query_plan_optimize_join_order_limit=10;
 
+-- Three-way left-deep join: `(test.hits JOIN small1) JOIN small2`. With small auxiliaries on both
+-- right sides the parallelized side stays as `test.hits` after each join; `findReadingStep` walks
+-- through two nested `JoinStep` nodes, descending into `children.at(0)` each time before reaching
+-- the `ReadFromMergeTree` for `test.hits`.
+SELECT count() FROM test.hits AS t1 INNER JOIN autopr_join_right_small AS t2 USING (UserID) INNER JOIN autopr_join_right_small_2 AS t3 USING (UserID) FORMAT Null SETTINGS log_comment='04103_query_7';
+
+-- Three-way nested join: `test.hits JOIN (small1 JOIN small2)`. The right side itself is a JOIN
+-- subtree (with its own runtime filter build), so the walk through `findReadingStep` still
+-- terminates at `test.hits` on the left.
+SELECT count() FROM test.hits AS t1 INNER JOIN (SELECT s1.UserID FROM autopr_join_right_small AS s1 INNER JOIN autopr_join_right_small_2 AS s2 USING (UserID)) AS t2 USING (UserID) FORMAT Null SETTINGS log_comment='04103_query_8';
+
 DROP TABLE autopr_join_right_small;
+DROP TABLE autopr_join_right_small_2;
 
 SET enable_parallel_replicas=0, automatic_parallel_replicas_mode=0;
 

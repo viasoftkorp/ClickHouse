@@ -175,12 +175,14 @@ void calculateHashTableCacheKeys(
         /// Canonicalize `JoinStep` children order so DP-driven side swaps don't cause the subtree
         /// hash to diverge between the single-replica and parallel-replicas plan builds in
         /// `considerEnablingParallelReplicas`. For commutative kinds (`INNER`/`FULL`/`CROSS`/`Comma`)
-        /// sort children by their cache key. For `LEFT`/`RIGHT` rely on the equivalence
-        /// `A LEFT JOIN B ≡ B RIGHT JOIN A`: emit the children in `LEFT`-anchored order by swapping
-        /// them when the step is a `RIGHT` JOIN. Other kinds keep their existing order.
+        /// sort children by their cache key. For `RIGHT` rely on the equivalence
+        /// `A RIGHT JOIN B ≡ B LEFT JOIN A`: swap the children and also remap the kind to `LEFT`,
+        /// so two structurally equivalent subtrees hash identically. Other kinds keep their
+        /// existing order. The (canonicalized) kind itself is mixed into the hash so that
+        /// otherwise identical subtrees with different kinds (`INNER` vs `LEFT`) do not collide.
         if (const auto * join_step = dynamic_cast<const JoinStep *>(node.step.get()); join_step && node.children.size() == 2)
         {
-            const auto kind = join_step->getJoin()->getTableJoin().kind();
+            auto kind = join_step->getJoin()->getTableJoin().kind();
             auto a = cache_keys[node.children.at(0)];
             auto b = cache_keys[node.children.at(1)];
             if (isInner(kind) || isFull(kind) || isCrossOrComma(kind))
@@ -191,7 +193,9 @@ void calculateHashTableCacheKeys(
             else if (isRight(kind))
             {
                 std::swap(a, b);
+                kind = JoinKind::Left;
             }
+            frame.hash.update(static_cast<uint8_t>(kind));
             frame.hash.update(a);
             frame.hash.update(b);
         }

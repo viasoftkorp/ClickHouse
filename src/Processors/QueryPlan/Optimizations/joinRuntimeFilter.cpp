@@ -245,17 +245,6 @@ bool tryAddJoinRuntimeFilter(QueryPlan::Node & node, QueryPlan::Nodes & nodes, c
     };
     hash_update_keys(join_keys_probe_side);
     hash_update_keys(join_keys_build_side);
-    auto hash_update_header = [&](const Block & header)
-    {
-        filter_name_hash.update(header.columns());
-        for (const auto & col : header)
-        {
-            filter_name_hash.update(col.name);
-            filter_name_hash.update(col.type->getName());
-        }
-    };
-    hash_update_header(*apply_filter_node->step->getOutputHeader());
-    hash_update_header(*build_filter_node->step->getOutputHeader());
     const String filter_name_prefix = fmt::format("{}_runtime_filter_{:016x}",
         check_left_does_not_contain ? "_exclusion_" : "",
         filter_name_hash.get64());
