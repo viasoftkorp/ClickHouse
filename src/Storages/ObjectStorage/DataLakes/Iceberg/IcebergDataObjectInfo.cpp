@@ -204,6 +204,7 @@ void IcebergObjectSerializableInfo::serializeForClusterFunctionProtocol(WriteBuf
         else
         {
             writeVarUInt(0, out);
+        }
     }
     if (protocol_version >= DBMS_CLUSTER_PROCESSING_PROTOCOL_VERSION_WITH_ICEBERG_IDENTITY_PARTITION_COLUMNS)
     {
@@ -314,6 +315,7 @@ void IcebergObjectSerializableInfo::deserializeForClusterFunctionProtocol(ReadBu
         else
         {
             first_row_id = std::nullopt;
+        }
     }
     if (protocol_version >= DBMS_CLUSTER_PROCESSING_PROTOCOL_VERSION_WITH_ICEBERG_IDENTITY_PARTITION_COLUMNS)
     {
