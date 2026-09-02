@@ -15,6 +15,7 @@
 #include <Parsers/ASTCreateQuery.h>
 #include <Parsers/ASTInsertQuery.h>
 #include <Parsers/ASTRenameQuery.h>
+#include <Processors/QueryPlan/Optimizations/QueryPlanOptimizationSettings.h>
 #include <Backups/BackupEntriesCollector.h>
 #include <Backups/IBackup.h>
 #include <Backups/RestorerFromBackup.h>
@@ -670,6 +671,12 @@ void StorageTimeSeries::readImpl(
     InterpreterSelectQueryAnalyzer interpreter(select_query, read_context, options, column_names);
     interpreter.addStorageLimits(*query_info.storage_limits);
     query_plan = std::move(interpreter).extractQueryPlan();
+
+    if (query_plan.isInitialized())
+    {
+        QueryPlanOptimizationSettings optimization_settings(read_context);
+        query_plan.optimize(optimization_settings);
+    }
 }
 
 
