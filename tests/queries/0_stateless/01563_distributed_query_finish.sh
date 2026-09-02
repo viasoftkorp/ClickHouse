@@ -31,7 +31,9 @@ for ((i = 0; i < 100; ++i)); do
         "--optimize_distributed_group_by_sharding_key=1"
         "--prefer_localhost_replica=0"
     )
-    $CLICKHOUSE_CLIENT "${opts[@]}" --query_id "$query_id" --format CSV -m -q "select count(), * from dist_01247 group by number order by number limit 1 format Null"
+    # The query uses `FORMAT Null` to discard the output (we only care about NETWORK_ERROR side effects).
+    # Do not pass `--format`: the `format` setting now takes precedence over the query `FORMAT` clause and would un-discard the output.
+    $CLICKHOUSE_CLIENT "${opts[@]}" --query_id "$query_id" -m -q "select count(), * from dist_01247 group by number order by number limit 1 format Null"
 
     $CLICKHOUSE_CLIENT -q "SYSTEM FLUSH LOGS query_log"
     # expect zero new network errors attributed to this query (or its shard sub-queries)

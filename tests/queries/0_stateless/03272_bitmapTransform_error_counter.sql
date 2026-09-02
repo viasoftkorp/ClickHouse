@@ -3,7 +3,9 @@
 -- any concurrent test triggering the same (very common) error code would perturb. The query is
 -- found by its `log_comment`, which survives comment attachment in the logged query text.
 
-SELECT bitmapToArray(bitmapTransform(bitmapBuild([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]), cast([5,999,2] as Array(UInt32)), cast([2,888,20] as Array(UInt32)))) AS res FORMAT Null SETTINGS log_comment = '03272_bitmap_transform';
+-- The bitmap is built from `Array(UInt32)` so that `888` fits into its element type: a replacement
+-- value that does not fit raises `BAD_ARGUMENTS`, which would mask what this test checks.
+SELECT bitmapToArray(bitmapTransform(bitmapBuild(cast([1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as Array(UInt32))), cast([5,999,2] as Array(UInt32)), cast([2,888,20] as Array(UInt32)))) AS res FORMAT Null SETTINGS log_comment = '03272_bitmap_transform';
 
 SYSTEM FLUSH LOGS query_log;
 

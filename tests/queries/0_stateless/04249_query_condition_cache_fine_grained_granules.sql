@@ -1,7 +1,3 @@
--- Tags: no-parallel-replicas
-
--- Does additional QCC lookups that the test doesn't expect
-SET automatic_parallel_replicas_mode = 0, enable_parallel_replicas = 0;
 SET parallel_replicas_local_plan = 1;
 
 SET allow_experimental_analyzer = 1;

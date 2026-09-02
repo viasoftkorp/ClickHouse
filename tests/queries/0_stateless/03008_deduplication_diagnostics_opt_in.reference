@@ -1,0 +1,115 @@
+insert_several_blocks_into_table main DEBUG 0
+insert_several_blocks_into_table main markers first 2
+insert_several_blocks_into_table main markers second 2
+insert_several_blocks_into_table first emit DEBUG total 6
+insert_several_blocks_into_table first emit DEBUG phase 5
+insert_several_blocks_into_table first emit probed settings 4
+insert_several_blocks_into_table first emit mutating 0
+insert_several_blocks_into_table second emit DEBUG total 6
+insert_several_blocks_into_table second emit DEBUG phase 5
+insert_several_blocks_into_table second emit probed settings 4
+insert_several_blocks_into_table second emit mutating 0
+mv_generates_several_blocks main DEBUG 0
+mv_generates_several_blocks main markers first 2
+mv_generates_several_blocks main markers second 2
+mv_generates_several_blocks first emit DEBUG total 7
+mv_generates_several_blocks first emit DEBUG phase 6
+mv_generates_several_blocks first emit probed settings 4
+mv_generates_several_blocks first emit mutating 0
+mv_generates_several_blocks second emit DEBUG total 7
+mv_generates_several_blocks second emit DEBUG phase 6
+mv_generates_several_blocks second emit probed settings 4
+mv_generates_several_blocks second emit mutating 0
+several_mv_into_one_table main DEBUG 0
+several_mv_into_one_table main markers first 2
+several_mv_into_one_table main markers second 2
+several_mv_into_one_table first emit DEBUG total 7
+several_mv_into_one_table first emit DEBUG phase 6
+several_mv_into_one_table first emit probed settings 4
+several_mv_into_one_table first emit mutating 0
+several_mv_into_one_table second emit DEBUG total 7
+several_mv_into_one_table second emit DEBUG phase 6
+several_mv_into_one_table second emit probed settings 4
+several_mv_into_one_table second emit mutating 0
+insert_several_blocks_into_table first stmt SET enable_analyzer=1
+insert_several_blocks_into_table first stmt SET max_insert_threads=10
+insert_several_blocks_into_table first stmt SET update_insert_deduplication_token_in_dependent_materialized_views=1
+insert_several_blocks_into_table first stmt SET deduplicate_blocks_in_dependent_materialized_views=1
+insert_several_blocks_into_table first stmt SET max_block_size=1
+insert_several_blocks_into_table first stmt SET min_insert_block_size_rows=0
+insert_several_blocks_into_table first stmt SET min_insert_block_size_bytes=0
+insert_several_blocks_into_table first stmt -- DEBUG (first) — a single query, only produces rows when counts mismatch WITH (SELECT count() FROM table_a_b) AS c_src, (SELECT count() FROM table_when_b_even) AS c_dst, (c_src != 4 OR c_dst != 2) AS mismatch SELECT 'DEBUG first: src/dst count expected/actual', toString(4) || '/' || toString(2) || ' expected vs ' || toString(c_src) || '/' || toString(c_dst) || ' actual' WHERE mismatch UNION ALL SELECT 'DEBUG first: table_when_b_even by _part ' || _part, toString(count()) FROM table_when_b_even WHERE mismatch GROUP BY _part UNION ALL SELECT 'DEBUG first: table_when_b_even row (' || toString(a) || ',' || toString(b) || ')', toString(count()) FROM table_when_b_even WHERE mismatch GROUP BY a, b UNION ALL SELECT 'DEBUG first: system.parts ' || table || '/' || name, toString(rows) || ' rows, ' || toString(bytes_on_disk) || ' bytes' FROM system.parts WHERE active AND database = currentDatabase() AND table IN ('table_a_b', 'table_when_b_even') AND mismatch UNION ALL SELECT 'DEBUG first: setting ' || name, value FROM system.settings WHERE name IN ( 'max_insert_threads', 'max_block_size', 'update_insert_deduplication_token_in_dependent_materialized_views', 'deduplicate_blocks_in_dependent_materialized_views' ) AND mismatch ORDER BY 1
+insert_several_blocks_into_table first emit parses 1
+insert_several_blocks_into_table second stmt SET enable_analyzer=1
+insert_several_blocks_into_table second stmt SET max_insert_threads=10
+insert_several_blocks_into_table second stmt SET update_insert_deduplication_token_in_dependent_materialized_views=1
+insert_several_blocks_into_table second stmt SET deduplicate_blocks_in_dependent_materialized_views=1
+insert_several_blocks_into_table second stmt SET max_block_size=1
+insert_several_blocks_into_table second stmt SET min_insert_block_size_rows=0
+insert_several_blocks_into_table second stmt SET min_insert_block_size_bytes=0
+insert_several_blocks_into_table second stmt -- DEBUG (second) — a single query, only produces rows when counts mismatch WITH (SELECT count() FROM table_a_b) AS c_src, (SELECT count() FROM table_when_b_even) AS c_dst, (c_src != 8 OR c_dst != 4) AS mismatch SELECT 'DEBUG second: src/dst count expected/actual', toString(8) || '/' || toString(4) || ' expected vs ' || toString(c_src) || '/' || toString(c_dst) || ' actual' WHERE mismatch UNION ALL SELECT 'DEBUG second: table_when_b_even by _part ' || _part, toString(count()) FROM table_when_b_even WHERE mismatch GROUP BY _part UNION ALL SELECT 'DEBUG second: table_when_b_even row (' || toString(a) || ',' || toString(b) || ')', toString(count()) FROM table_when_b_even WHERE mismatch GROUP BY a, b UNION ALL SELECT 'DEBUG second: system.parts ' || table || '/' || name, toString(rows) || ' rows, ' || toString(bytes_on_disk) || ' bytes' FROM system.parts WHERE active AND database = currentDatabase() AND table IN ('table_a_b', 'table_when_b_even') AND mismatch UNION ALL SELECT 'DEBUG second: setting ' || name, value FROM system.settings WHERE name IN ( 'max_insert_threads', 'max_block_size', 'update_insert_deduplication_token_in_dependent_materialized_views', 'deduplicate_blocks_in_dependent_materialized_views' ) AND mismatch ORDER BY 1
+insert_several_blocks_into_table second emit parses 1
+mv_generates_several_blocks first stmt SET enable_analyzer=1
+mv_generates_several_blocks first stmt SET max_insert_threads=10
+mv_generates_several_blocks first stmt SET update_insert_deduplication_token_in_dependent_materialized_views=1
+mv_generates_several_blocks first stmt SET deduplicate_blocks_in_dependent_materialized_views=1
+mv_generates_several_blocks first stmt SET min_joined_block_size_rows = 1
+mv_generates_several_blocks first stmt SET max_joined_block_size_rows = 1
+mv_generates_several_blocks first stmt SET max_block_size=1
+mv_generates_several_blocks first stmt SET min_insert_block_size_rows=0
+mv_generates_several_blocks first stmt SET min_insert_block_size_bytes=0
+mv_generates_several_blocks first stmt -- DEBUG (first) — a single query, only produces rows when counts mismatch WITH (SELECT count() FROM table_a_b) AS c_src, (SELECT count() FROM table_when_b_even_and_joined) AS c_dst, (c_src != 5 OR c_dst != 9) AS mismatch SELECT 'DEBUG first: src/dst count expected/actual', toString(5) || '/' || toString(9) || ' expected vs ' || toString(c_src) || '/' || toString(c_dst) || ' actual' WHERE mismatch UNION ALL SELECT 'DEBUG first: table_when_b_even_and_joined by _part ' || _part, toString(count()) FROM table_when_b_even_and_joined WHERE mismatch GROUP BY _part UNION ALL SELECT 'DEBUG first: table_when_b_even_and_joined row (' || toString(a_src) || ',' || toString(a_join) || ',' || toString(b) || ')', toString(count()) FROM table_when_b_even_and_joined WHERE mismatch GROUP BY a_src, a_join, b UNION ALL SELECT 'DEBUG first: system.parts ' || table || '/' || name, toString(rows) || ' rows, ' || toString(bytes_on_disk) || ' bytes' FROM system.parts WHERE active AND database = currentDatabase() AND table IN ('table_a_b', 'table_for_join_with', 'table_when_b_even_and_joined') AND mismatch UNION ALL SELECT 'DEBUG first: table def ' || name, engine || ' :: ' || create_table_query FROM system.tables WHERE database = currentDatabase() AND name IN ('table_a_b', 'table_for_join_with', 'table_when_b_even_and_joined', 'mv_b_even') AND mismatch UNION ALL SELECT 'DEBUG first: setting ' || name, value FROM system.settings WHERE name IN ( 'max_insert_threads', 'max_block_size', 'update_insert_deduplication_token_in_dependent_materialized_views', 'deduplicate_blocks_in_dependent_materialized_views' ) AND mismatch ORDER BY 1
+mv_generates_several_blocks first emit parses 1
+mv_generates_several_blocks second stmt SET enable_analyzer=1
+mv_generates_several_blocks second stmt SET max_insert_threads=10
+mv_generates_several_blocks second stmt SET update_insert_deduplication_token_in_dependent_materialized_views=1
+mv_generates_several_blocks second stmt SET deduplicate_blocks_in_dependent_materialized_views=1
+mv_generates_several_blocks second stmt SET min_joined_block_size_rows = 1
+mv_generates_several_blocks second stmt SET max_joined_block_size_rows = 1
+mv_generates_several_blocks second stmt SET max_block_size=1
+mv_generates_several_blocks second stmt SET min_insert_block_size_rows=0
+mv_generates_several_blocks second stmt SET min_insert_block_size_bytes=0
+mv_generates_several_blocks second stmt -- DEBUG (second) — a single query, only produces rows when counts mismatch WITH (SELECT count() FROM table_a_b) AS c_src, (SELECT count() FROM table_when_b_even_and_joined) AS c_dst, (c_src != 10 OR c_dst != 18) AS mismatch SELECT 'DEBUG second: src/dst count expected/actual', toString(10) || '/' || toString(18) || ' expected vs ' || toString(c_src) || '/' || toString(c_dst) || ' actual' WHERE mismatch UNION ALL SELECT 'DEBUG second: table_when_b_even_and_joined by _part ' || _part, toString(count()) FROM table_when_b_even_and_joined WHERE mismatch GROUP BY _part UNION ALL SELECT 'DEBUG second: table_when_b_even_and_joined row (' || toString(a_src) || ',' || toString(a_join) || ',' || toString(b) || ')', toString(count()) FROM table_when_b_even_and_joined WHERE mismatch GROUP BY a_src, a_join, b UNION ALL SELECT 'DEBUG second: system.parts ' || table || '/' || name, toString(rows) || ' rows, ' || toString(bytes_on_disk) || ' bytes' FROM system.parts WHERE active AND database = currentDatabase() AND table IN ('table_a_b', 'table_for_join_with', 'table_when_b_even_and_joined') AND mismatch UNION ALL SELECT 'DEBUG second: table def ' || name, engine || ' :: ' || create_table_query FROM system.tables WHERE database = currentDatabase() AND name IN ('table_a_b', 'table_for_join_with', 'table_when_b_even_and_joined', 'mv_b_even') AND mismatch UNION ALL SELECT 'DEBUG second: setting ' || name, value FROM system.settings WHERE name IN ( 'max_insert_threads', 'max_block_size', 'update_insert_deduplication_token_in_dependent_materialized_views', 'deduplicate_blocks_in_dependent_materialized_views' ) AND mismatch ORDER BY 1
+mv_generates_several_blocks second emit parses 1
+several_mv_into_one_table first stmt SET enable_analyzer=1
+several_mv_into_one_table first stmt SET max_insert_threads=10
+several_mv_into_one_table first stmt SET update_insert_deduplication_token_in_dependent_materialized_views=1
+several_mv_into_one_table first stmt SET deduplicate_blocks_in_dependent_materialized_views=1
+several_mv_into_one_table first stmt SET max_block_size=1
+several_mv_into_one_table first stmt SET min_insert_block_size_rows=0
+several_mv_into_one_table first stmt SET min_insert_block_size_bytes=0
+several_mv_into_one_table first stmt -- DEBUG (first) — a single query, only produces rows when counts mismatch WITH (SELECT count() FROM table_src) AS c_src, (SELECT count() FROM table_dst) AS c_dst, (c_src != 4 OR c_dst != 3) AS mismatch SELECT 'DEBUG first: src/dst count expected/actual', toString(4) || '/' || toString(3) || ' expected vs ' || toString(c_src) || '/' || toString(c_dst) || ' actual' WHERE mismatch UNION ALL SELECT 'DEBUG first: table_dst by _part ' || _part, toString(count()) FROM table_dst WHERE mismatch GROUP BY _part UNION ALL SELECT 'DEBUG first: table_dst row (' || toString(a) || ',' || toString(b) || ')', toString(count()) FROM table_dst WHERE mismatch GROUP BY a, b UNION ALL SELECT 'DEBUG first: system.parts ' || table || '/' || name, toString(rows) || ' rows, ' || toString(bytes_on_disk) || ' bytes' FROM system.parts WHERE active AND database = currentDatabase() AND table IN ('table_src', 'table_dst') AND mismatch UNION ALL SELECT 'DEBUG first: table def ' || name, engine || ' :: ' || create_table_query FROM system.tables WHERE database = currentDatabase() AND name IN ('table_src', 'table_dst', 'mv_b_even', 'mv_b_even_even') AND mismatch UNION ALL SELECT 'DEBUG first: setting ' || name, value FROM system.settings WHERE name IN ( 'max_insert_threads', 'max_block_size', 'update_insert_deduplication_token_in_dependent_materialized_views', 'deduplicate_blocks_in_dependent_materialized_views' ) AND mismatch ORDER BY 1
+several_mv_into_one_table first emit parses 1
+several_mv_into_one_table second stmt SET enable_analyzer=1
+several_mv_into_one_table second stmt SET max_insert_threads=10
+several_mv_into_one_table second stmt SET update_insert_deduplication_token_in_dependent_materialized_views=1
+several_mv_into_one_table second stmt SET deduplicate_blocks_in_dependent_materialized_views=1
+several_mv_into_one_table second stmt SET max_block_size=1
+several_mv_into_one_table second stmt SET min_insert_block_size_rows=0
+several_mv_into_one_table second stmt SET min_insert_block_size_bytes=0
+several_mv_into_one_table second stmt -- DEBUG (second) — a single query, only produces rows when counts mismatch WITH (SELECT count() FROM table_src) AS c_src, (SELECT count() FROM table_dst) AS c_dst, (c_src != 8 OR c_dst != 6) AS mismatch SELECT 'DEBUG second: src/dst count expected/actual', toString(8) || '/' || toString(6) || ' expected vs ' || toString(c_src) || '/' || toString(c_dst) || ' actual' WHERE mismatch UNION ALL SELECT 'DEBUG second: table_dst by _part ' || _part, toString(count()) FROM table_dst WHERE mismatch GROUP BY _part UNION ALL SELECT 'DEBUG second: table_dst row (' || toString(a) || ',' || toString(b) || ')', toString(count()) FROM table_dst WHERE mismatch GROUP BY a, b UNION ALL SELECT 'DEBUG second: system.parts ' || table || '/' || name, toString(rows) || ' rows, ' || toString(bytes_on_disk) || ' bytes' FROM system.parts WHERE active AND database = currentDatabase() AND table IN ('table_src', 'table_dst') AND mismatch UNION ALL SELECT 'DEBUG second: table def ' || name, engine || ' :: ' || create_table_query FROM system.tables WHERE database = currentDatabase() AND name IN ('table_src', 'table_dst', 'mv_b_even', 'mv_b_even_even') AND mismatch UNION ALL SELECT 'DEBUG second: setting ' || name, value FROM system.settings WHERE name IN ( 'max_insert_threads', 'max_block_size', 'update_insert_deduplication_token_in_dependent_materialized_views', 'deduplicate_blocks_in_dependent_materialized_views' ) AND mismatch ORDER BY 1
+several_mv_into_one_table second emit parses 1
+03008_deduplication_insert_several_blocks_replicated first parses [first]
+03008_deduplication_insert_several_blocks_replicated second parses [second]
+03008_deduplication_insert_several_blocks_replicated main debug-on-fail 0
+03008_deduplication_insert_several_blocks_replicated emit-debug-only 1
+03008_deduplication_mv_generates_several_blocks_replicated first parses [first]
+03008_deduplication_mv_generates_several_blocks_replicated second parses [second]
+03008_deduplication_mv_generates_several_blocks_replicated main debug-on-fail 0
+03008_deduplication_mv_generates_several_blocks_replicated emit-debug-only 1
+03008_deduplication_several_mv_into_one_table_replicated first parses [first]
+03008_deduplication_several_mv_into_one_table_replicated second parses [second]
+03008_deduplication_several_mv_into_one_table_replicated main debug-on-fail 0
+03008_deduplication_several_mv_into_one_table_replicated emit-debug-only 1
+03008_deduplication_insert_several_blocks_nonreplicated first parses [first]
+03008_deduplication_insert_several_blocks_nonreplicated second parses [second]
+03008_deduplication_insert_several_blocks_nonreplicated main debug-on-fail 0
+03008_deduplication_insert_several_blocks_nonreplicated emit-debug-only 1
+03008_deduplication_mv_generates_several_blocks_nonreplicated first parses [first]
+03008_deduplication_mv_generates_several_blocks_nonreplicated second parses [second]
+03008_deduplication_mv_generates_several_blocks_nonreplicated main debug-on-fail 0
+03008_deduplication_mv_generates_several_blocks_nonreplicated emit-debug-only 1
+03008_deduplication_several_mv_into_one_table_nonreplicated first parses [first]
+03008_deduplication_several_mv_into_one_table_nonreplicated second parses [second]
+03008_deduplication_several_mv_into_one_table_nonreplicated main debug-on-fail 0
+03008_deduplication_several_mv_into_one_table_nonreplicated emit-debug-only 1
