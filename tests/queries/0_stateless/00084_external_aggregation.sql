@@ -3,6 +3,7 @@
 -- when 25 tests shared the server.
 
 SET log_queries = 1;
+SET max_execution_time = 30;
 SET max_bytes_ratio_before_external_group_by = 0;
 SET group_by_two_level_threshold = 1;
 SET group_by_two_level_threshold_bytes = 1;
