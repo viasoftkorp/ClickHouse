@@ -47,8 +47,14 @@ void IMergingAlgorithmWithDelayedChunk::updateCursor(Input & input, size_t sourc
     auto & current_input = current_inputs[source_num];
 
     /// Extend lifetime of last chunk.
-    last_chunk.swap(current_input.chunk);
-    last_chunk_sort_columns = std::move(cursors[source_num].sort_columns);
+    /// A virtual row is never referenced by `last_key`, so it must not displace the chunk kept
+    /// alive here: `last_key` may still point into that chunk, the merge having skipped the
+    /// virtual row without closing its group (see `SummingSortedAlgorithm::merge`).
+    if (!current_input.is_virtual_row)
+    {
+        last_chunk.swap(current_input.chunk);
+        last_chunk_sort_columns = std::move(cursors[source_num].sort_columns);
+    }
 
     current_input.swap(input);
     cursors[source_num].reset(current_input.chunk.getColumns(), *header, current_input.chunk.getNumRows(), current_input.permutation);

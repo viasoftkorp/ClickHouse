@@ -28,6 +28,7 @@ public:
 
     const char * getName() const override { return "VersionedCollapsingAlgorithm"; }
     Status merge() override;
+    std::shared_ptr<MergeTreeReadInfo> getVirtualRowForNextOutput() override;
 
 private:
     size_t sign_column_number = 0;

@@ -188,6 +188,19 @@ std::optional<Chunk> CollapsingSortedAlgorithm::insertRows()
     return res;
 }
 
+std::shared_ptr<MergeTreeReadInfo> CollapsingSortedAlgorithm::getVirtualRowForNextOutput()
+{
+    /// Rows merged but not pulled yet precede the queue.
+    if (merged_data->mergedRows() != 0)
+        return nullptr;
+
+    /// `last_row` keys the group being accumulated, whose rows are not emitted yet and precede the queue.
+    if (!last_row.empty())
+        return makeVirtualRowBound(*last_row.sort_columns, last_row.row_num);
+
+    return makeVirtualRowBoundFromQueue();
+}
+
 IMergingAlgorithm::Status CollapsingSortedAlgorithm::merge()
 {
     /// Rare case, which may happen when index_granularity is 1, but we needed to insert 2 rows inside insertRows().

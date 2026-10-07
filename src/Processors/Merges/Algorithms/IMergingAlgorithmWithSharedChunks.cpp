@@ -21,6 +21,9 @@ IMergingAlgorithmWithSharedChunks::IMergingAlgorithmWithSharedChunks(
 
 void IMergingAlgorithmWithSharedChunks::initialize(Inputs inputs)
 {
+    for (auto & input : inputs)
+        prepareVirtualRowInput(input, *header, virtual_row_conversions);
+
     removeReplicatedFromSortingColumns(header, inputs, description);
     removeConstAndSparse(inputs);
     merged_data->initialize(*header, inputs);
@@ -33,6 +36,7 @@ void IMergingAlgorithmWithSharedChunks::initialize(Inputs inputs)
         auto & source = sources[source_num];
 
         source.skip_last_row = inputs[source_num].skip_last_row;
+        source.is_virtual_row = inputs[source_num].is_virtual_row;
         source.chunk = chunk_allocator.alloc(inputs[source_num].chunk);
         cursors[source_num] = SortCursorImpl(
             *header, source.chunk->getColumns(), source.chunk->getNumRows(), description, source_num, inputs[source_num].permutation);
@@ -112,11 +116,13 @@ bool IMergingAlgorithmWithSharedChunks::sourcesHaveRunsWorthSkipping() const
 
 void IMergingAlgorithmWithSharedChunks::consume(Input & input, size_t source_num)
 {
+    prepareVirtualRowInput(input, *header, virtual_row_conversions);
     removeReplicatedFromSortingColumns(header, input, description);
     removeConstAndSparse(input);
 
     auto & source = sources[source_num];
     source.skip_last_row = input.skip_last_row;
+    source.is_virtual_row = input.is_virtual_row;
     source.chunk = chunk_allocator.alloc(input.chunk);
     cursors[source_num].reset(source.chunk->getColumns(), *header, source.chunk->getNumRows(), input.permutation);
 

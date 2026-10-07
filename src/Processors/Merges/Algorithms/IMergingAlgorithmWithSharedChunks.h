@@ -1,5 +1,6 @@
 #pragma once
 #include <Processors/Merges/Algorithms/IMergingAlgorithm.h>
+#include <Processors/Merges/Algorithms/MergeTreeReadInfo.h>
 #include <Processors/Merges/Algorithms/RowFilterInfo.h>
 #include <Processors/Merges/Algorithms/RowRef.h>
 #include <Processors/Merges/Algorithms/MergedData.h>
@@ -32,11 +33,16 @@ private:
 
     SortCursorImpls cursors;
 
+    /// From the first virtual row seen at the inputs; null while none was seen, which also
+    /// means there is nothing to announce downstream (see `makeVirtualRowBound`).
+    ExpressionActionsPtr virtual_row_conversions;
+
 protected:
     struct Source
     {
         detail::SharedChunkPtr chunk;
         bool skip_last_row{};
+        bool is_virtual_row{};
     };
 
     /// Sources currently being merged.
@@ -89,6 +95,24 @@ protected:
 
     void setRowRef(RowRef & row, SortCursor & cursor) { row.set(cursor, sources[cursor.impl->order].chunk); }
     bool skipLastRowFor(size_t input_number) const { return sources[input_number].skip_last_row; }
+
+    /// `getVirtualRowForNextOutput` for the bound at `row` of `sort_columns` (a row ref the algorithm
+    /// holds, or the front of the queue). Null when the inputs carried no virtual rows.
+    std::shared_ptr<MergeTreeReadInfo> makeVirtualRowBound(const ColumnRawPtrs & sort_columns, size_t row) const
+    {
+        if (!virtual_row_conversions)
+            return nullptr;
+        return makeVirtualRowInfo(*header, description, sort_columns.data(), row, virtual_row_conversions);
+    }
+
+    /// The bound at the front of the queue, for an algorithm that is not accumulating a group.
+    std::shared_ptr<MergeTreeReadInfo> makeVirtualRowBoundFromQueue()
+    {
+        if (!queue.isValid())
+            return nullptr;
+        const auto & current = *queue.current().first;
+        return makeVirtualRowBound(current->sort_columns, current->getRow());
+    }
     bool rowsHaveDifferentSortColumns(const RowRef & lhs, const RowRef & rhs)
     {
         /// By the time this method is called, `sources_origin_merge_tree_part_level[lhs.source_stream_index]` must have been

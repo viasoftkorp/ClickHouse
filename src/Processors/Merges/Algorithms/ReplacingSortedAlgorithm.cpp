@@ -366,6 +366,19 @@ void ReplacingSortedAlgorithm::saveChunkForSkippingFinalFromSelectedRow()
         to_be_emitted.push(std::move(selected_row.owned_chunk));
 }
 
+std::shared_ptr<MergeTreeReadInfo> ReplacingSortedAlgorithm::getVirtualRowForNextOutput()
+{
+    /// Rows merged but not pulled yet, and the chunks the skipping FINAL holds back, precede the queue.
+    if (merged_data->mergedRows() != 0 || !to_be_emitted.empty())
+        return nullptr;
+
+    /// The selected row of the group being accumulated is not emitted yet and precedes the queue.
+    if (!selected_row.empty())
+        return makeVirtualRowBound(*selected_row.sort_columns, selected_row.row_num);
+
+    return makeVirtualRowBoundFromQueue();
+}
+
 void ReplacingSortedAlgorithm::saveChunkForSkippingFinalFromSource(size_t current_source_index)
 {
     if (enable_vertical_final)

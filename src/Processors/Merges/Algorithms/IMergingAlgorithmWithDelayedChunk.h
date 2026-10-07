@@ -4,6 +4,7 @@
 #include <Core/SortCursor.h>
 #include <Core/SortDescription.h>
 #include <Processors/Merges/Algorithms/IMergingAlgorithm.h>
+#include <Processors/Merges/Algorithms/MergeTreeReadInfo.h>
 #include <Processors/Merges/Algorithms/RowRef.h>
 
 namespace DB
@@ -28,9 +29,33 @@ protected:
 
     ColumnRawPtrs last_chunk_sort_columns; /// Point to last_chunk if valid.
 
+    /// From the first virtual row seen at the inputs (the derived algorithm converts them with
+    /// `prepareVirtualRowInput` before preprocessing its chunks); null while none was seen.
+    ExpressionActionsPtr virtual_row_conversions;
+
     void initializeQueue(Inputs inputs);
     void updateCursor(Input & input, size_t source_num);
     bool skipLastRowFor(size_t input_number) const { return current_inputs[input_number].skip_last_row; }
+    bool isVirtualRowInput(size_t input_number) const { return current_inputs[input_number].is_virtual_row; }
+
+    /// `getVirtualRowForNextOutput` for the bound at `row` of `sort_columns` (the key of the group
+    /// being accumulated, or the front of the queue). Null when the inputs carried no virtual rows.
+    std::shared_ptr<MergeTreeReadInfo> makeVirtualRowBound(const IColumn * const * sort_columns, size_t row) const
+    {
+        if (!virtual_row_conversions)
+            return nullptr;
+        return makeVirtualRowInfo(*header, description, sort_columns, row, virtual_row_conversions);
+    }
+
+    /// The bound at the front of the queue, for an algorithm that is not accumulating a group.
+    std::shared_ptr<MergeTreeReadInfo> makeVirtualRowBoundFromQueue()
+    {
+        if (!queue.isValid())
+            return nullptr;
+        const auto & current = *queue.current().first;
+        return makeVirtualRowBound(current->sort_columns.data(), current->getRow());
+    }
+
     void setRowRef(detail::RowRef & row, SortCursor & cursor) { row.set(cursor); }
     bool rowsHaveDifferentSortColumns(const detail::RowRef & lhs, const detail::RowRef & rhs)
     {

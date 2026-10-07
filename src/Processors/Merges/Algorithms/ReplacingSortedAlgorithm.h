@@ -60,6 +60,7 @@ public:
     const char * getName() const override { return "ReplacingSortedAlgorithm"; }
     void initialize(Inputs inputs) override;
     Status merge() override;
+    std::shared_ptr<MergeTreeReadInfo> getVirtualRowForNextOutput() override;
 
 private:
     ssize_t is_deleted_column_number = -1;

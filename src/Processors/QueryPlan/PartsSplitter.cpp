@@ -15,6 +15,8 @@
 #include <IO/Operators.h>
 #include <Parsers/ASTFunction.h>
 #include <Parsers/ASTLiteral.h>
+#include <Processors/ISimpleTransform.h>
+#include <Processors/Merges/Algorithms/MergeTreeReadInfo.h>
 #include <Processors/Transforms/ExpressionTransform.h>
 #include <Processors/Transforms/FilterSortedStreamByRange.h>
 #include <Storages/MergeTree/IMergeTreeDataPart.h>
@@ -1236,6 +1238,8 @@ SplitPartsWithRangesByPrimaryKeyResult splitPartsWithRangesByPrimaryKey(
 
     auto split_ranges = splitIntersectingPartsRangesIntoLayers(
         intersecting_parts_ranges, max_layers, primary_key.column_names.size(), in_reverse_order, logger);
+    result.layer_borders = split_ranges.borders;
+    result.in_reverse_order = split_ranges.in_reverse_order;
     result.merging_pipes = readByLayers(std::move(split_ranges), primary_key, create_merging_pipe, context);
     return result;
 }
@@ -1310,6 +1314,86 @@ void addLayerRangeFilterToPipe(
 {
     auto filters = buildFilters(primary_key, borders, in_reverse_order);
     applyRangeFilterFromAST(pipe, filters.at(layer_index), "filter distributed FINAL layer", primary_key, context);
+}
+
+namespace
+{
+
+/// Replaces the key a virtual row announces by `bound` when the bound comes later in the reading
+/// order; `direction` is the sign of the reading order relative to the key values.
+class ClampVirtualRowTransform : public ISimpleTransform
+{
+public:
+    ClampVirtualRowTransform(SharedHeader header, Block bound_, int direction_)
+        : ISimpleTransform(header, header, /*skip_empty_chunks_=*/ false)
+        , bound(std::move(bound_))
+        , direction(direction_)
+    {
+    }
+
+    String getName() const override { return "ClampVirtualRowTransform"; }
+
+    void transform(Chunk & chunk) override
+    {
+        if (!isVirtualRow(chunk))
+            return;
+
+        auto read_info = std::make_shared<MergeTreeReadInfo>(*chunk.getChunkInfos().get<MergeTreeReadInfo>());
+        Block & pk_block = read_info->pk_block;
+        if (pk_block.columns() > bound.columns())
+            return;
+
+        int cmp = 0;
+        for (size_t i = 0; i < pk_block.columns() && cmp == 0; ++i)
+            cmp = pk_block.getByPosition(i).column->compareAt(0, 0, *bound.getByPosition(i).column, /*nan_direction_hint=*/ 1);
+
+        if (cmp * direction >= 0)
+            return;
+
+        for (size_t i = 0; i < pk_block.columns(); ++i)
+            pk_block.getByPosition(i).column = bound.getByPosition(i).column;
+
+        chunk.getChunkInfos().extract<MergeTreeReadInfo>();
+        chunk.getChunkInfos().add(std::move(read_info));
+    }
+
+private:
+    Block bound;
+    int direction;
+};
+
+}
+
+void clampVirtualRowsToLayerBorder(
+    Pipe & pipe,
+    const KeyDescription & primary_key,
+    const std::vector<std::vector<Field>> & borders,
+    size_t layer_index,
+    bool in_reverse_order,
+    bool read_in_reverse)
+{
+    /// Layer `i` lies between borders[i-1] and borders[i]: read along the storage order it starts
+    /// at the former, read against it at the latter; the first and the last layer are open-ended.
+    if (read_in_reverse ? layer_index >= borders.size() : layer_index == 0)
+        return;
+    const auto & border = borders[read_in_reverse ? layer_index : layer_index - 1];
+
+    ColumnsWithTypeAndName bound_columns;
+    bound_columns.reserve(border.size());
+    for (size_t i = 0; i < border.size(); ++i)
+    {
+        const auto & type = primary_key.data_types.at(i);
+        auto column = type->createColumn();
+        column->insert(border[i]);
+        bound_columns.emplace_back(std::move(column), type, primary_key.column_names.at(i));
+    }
+    Block bound(std::move(bound_columns));
+
+    const int direction = (in_reverse_order ? -1 : 1) * (read_in_reverse ? -1 : 1);
+    pipe.addSimpleTransform([&](const SharedHeader & header)
+    {
+        return std::make_shared<ClampVirtualRowTransform>(header, bound, direction);
+    });
 }
 
 RangesInDataParts findPKRangesForFinalAfterSkipIndex(

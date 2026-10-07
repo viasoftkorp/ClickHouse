@@ -85,4 +85,39 @@ Block setVirtualRow(Chunk & chunk, const Block & header, bool apply_virtual_row_
     return pk_block;
 }
 
+bool prepareVirtualRowInput(IMergingAlgorithm::Input & input, const Block & header, ExpressionActionsPtr & conversions)
+{
+    if (!isVirtualRow(input.chunk))
+        return false;
+
+    if (!conversions)
+        conversions = input.chunk.getChunkInfos().get<MergeTreeReadInfo>()->virtual_row_conversions;
+
+    /// The merge compares the raw sort columns the virtual row was built from, so the conversions
+    /// (for the sort expressions of the step downstream) are not applied here.
+    setVirtualRow(input.chunk, header, /*apply_virtual_row_conversions=*/ false);
+    IMergingAlgorithm::removeConstAndSparse(input);
+    input.skip_last_row = true;
+    input.is_virtual_row = true;
+    return true;
+}
+
+std::shared_ptr<MergeTreeReadInfo> makeVirtualRowInfo(
+    const Block & header,
+    const SortDescription & description,
+    const IColumn * const * sort_columns,
+    size_t row,
+    ExpressionActionsPtr conversions)
+{
+    ColumnsWithTypeAndName pk_columns;
+    pk_columns.reserve(description.size());
+    for (size_t i = 0; i < description.size(); ++i)
+    {
+        const auto & name = description[i].column_name;
+        pk_columns.emplace_back(sort_columns[i]->cut(row, 1), header.getByName(name).type, name);
+    }
+
+    return std::make_shared<MergeTreeReadInfo>(0, Block(std::move(pk_columns)), std::move(conversions));
+}
+
 }

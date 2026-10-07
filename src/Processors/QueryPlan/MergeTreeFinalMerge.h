@@ -18,7 +18,9 @@ namespace DB
 /// sorted by `sort_description`. For `Replacing` with `enable_vertical_final`, appends the
 /// `SelectByIndicesTransform` that materializes the vertical-final result. `read_in_reverse` means
 /// the input streams are read in the reverse order relative to the storage order (supported only
-/// for `Replacing`, see `ReplacingSortedAlgorithm`).
+/// for `Replacing`, see `ReplacingSortedAlgorithm`). When the streams carry virtual rows (a read in
+/// order, see `ReadFromMergeTree::canUseVirtualRowWithFinal`), the merge announces its own to the
+/// merge downstream; `virtual_row_per_block` makes it do so after every chunk, not only the first.
 void addMergingFinal(
     Pipe & pipe,
     const SortDescription & sort_description,
@@ -26,7 +28,8 @@ void addMergingFinal(
     const StorageMetadataPtr & metadata_snapshot,
     size_t max_block_size_rows,
     bool enable_vertical_final,
-    bool read_in_reverse = false);
+    bool read_in_reverse,
+    bool virtual_row_per_block);
 
 /// One lane of a distributed task's read: the marks it reads. When `needs_merge` it is a FINAL intersecting
 /// layer (read in order, trimmed to `(borders[index-1], borders[index]]`, then merge-deduplicated); otherwise

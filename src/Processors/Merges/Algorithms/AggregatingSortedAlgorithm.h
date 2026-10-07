@@ -33,6 +33,7 @@ public:
     void initialize(Inputs inputs) override;
     void consume(Input & input, size_t source_num) override;
     Status merge() override;
+    std::shared_ptr<MergeTreeReadInfo> getVirtualRowForNextOutput() override;
 
     MergedStats getMergedStats() const override { return merged_data.getMergedStats(); }
 

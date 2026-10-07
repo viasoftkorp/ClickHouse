@@ -864,7 +864,10 @@ Pipe ReadFromMergeTree::readInOrder(
     const bool has_hard_limit_below_one_block = read_type != ReadType::Default && read_limit && read_limit < block_size.max_block_size_rows;
     const bool has_soft_limit_below_one_block = read_type != ReadType::Default && query_task_size_limit && query_task_size_limit < block_size.max_block_size_rows;
 
-    const bool use_virtual_row = virtual_row_conversion && (read_type == ReadType::InOrder || read_type == ReadType::InReverseOrder);
+    /// A FINAL read is in order even when no step asked for it (see `spreadMarkRangesAmongStreamsFinal`),
+    /// and then nothing downstream consumes virtual rows, while vertical FINAL may be on.
+    const bool use_virtual_row = virtual_row_conversion && reader_settings.read_in_order
+        && (read_type == ReadType::InOrder || read_type == ReadType::InReverseOrder);
     const bool use_virtual_row_per_block = use_virtual_row && context->getSettingsRef()[Setting::read_in_order_use_virtual_row_per_block];
 
     if (use_virtual_row_per_block && read_type == ReadType::InReverseOrder)
@@ -1025,7 +1028,13 @@ Pipe ReadFromMergeTree::readInOrder(
         if (use_virtual_row)
         {
             const auto & primary_key = storage_snapshot->metadata->primary_key;
-            size_t num_pk_columns_required = virtual_row_conversion->getRequiredColumnsWithTypes().size();
+
+            /// The FINAL merges compare the whole sorting key, which is the primary key here (see
+            /// `canUseVirtualRowWithFinal`), so their virtual rows must cover it; the merge of the
+            /// sorting step needs only the prefix its conversions read.
+            size_t num_pk_columns_required = isQueryWithFinal()
+                ? primary_key.column_names.size()
+                : virtual_row_conversion->getRequiredColumnsWithTypes().size();
 
             ColumnsWithTypeAndName pk_header_columns;
             pk_header_columns.reserve(num_pk_columns_required);
@@ -2625,10 +2634,22 @@ Pipe ReadFromMergeTree::spreadMarkRangesAmongStreamsFinal(
                 /// reach `createProjection` or `addMergingFinal` below. Dropping it is safe here:
                 /// unlike the join-by-shards path, the per-layer pipes are simply united, so their
                 /// positions carry no meaning.
-                for (auto && merging_pipe : split_ranges_result.merging_pipes)
+                for (size_t layer = 0; layer < split_ranges_result.merging_pipes.size(); ++layer)
                 {
-                    if (!merging_pipe.empty())
-                        pipes.push_back(std::move(merging_pipe));
+                    auto & merging_pipe = split_ranges_result.merging_pipes[layer];
+                    if (merging_pipe.empty())
+                        continue;
+
+                    if (virtual_row_conversion && !split_ranges_result.layer_borders.empty())
+                        clampVirtualRowsToLayerBorder(
+                            merging_pipe,
+                            storage_snapshot->metadata->getPrimaryKey(),
+                            split_ranges_result.layer_borders,
+                            layer,
+                            split_ranges_result.in_reverse_order,
+                            read_in_reverse);
+
+                    pipes.push_back(std::move(merging_pipe));
                 }
             }
             else
@@ -2684,7 +2705,8 @@ Pipe ReadFromMergeTree::spreadMarkRangesAmongStreamsFinal(
                 storage_snapshot->metadata,
                 block_size.max_block_size_rows,
                 enable_vertical_final,
-                read_in_reverse);
+                read_in_reverse,
+                settings[Setting::read_in_order_use_virtual_row_per_block]);
 
         merging_pipes.emplace_back(Pipe::unitePipes(std::move(pipes)));
     }
@@ -4069,11 +4091,57 @@ bool ReadFromMergeTree::requestReadingInOrder(size_t prefix_size, int direction,
 
 bool ReadFromMergeTree::setVirtualRowConversions(ActionsDAG virtual_row_conversion_)
 {
-    /// Disable virtual row for FINAL.
-    if (isQueryWithFinal() || !context->getSettingsRef()[Setting::read_in_order_use_virtual_row])
+    if (!context->getSettingsRef()[Setting::read_in_order_use_virtual_row])
+        return false;
+
+    if (isQueryWithFinal() && !canUseVirtualRowWithFinal())
         return false;
 
     virtual_row_conversion = std::make_shared<ExpressionActions>(std::move(virtual_row_conversion_));
+    return true;
+}
+
+bool ReadFromMergeTree::canUseVirtualRowWithFinal() const
+{
+    /// The FINAL merges consume the virtual rows of their part streams and announce the key of
+    /// their own next output to the merge downstream. That key bounds the output only for the
+    /// engines that never emit a key below their inputs: Graphite rounds the time column down.
+    switch (data.merging_params.mode)
+    {
+        case MergeTreeData::MergingParams::Replacing:
+        case MergeTreeData::MergingParams::Collapsing:
+        case MergeTreeData::MergingParams::VersionedCollapsing:
+        case MergeTreeData::MergingParams::Summing:
+        case MergeTreeData::MergingParams::Aggregating:
+        case MergeTreeData::MergingParams::Coalescing:
+            break;
+        case MergeTreeData::MergingParams::Ordinary:
+        case MergeTreeData::MergingParams::Graphite:
+            return false;
+    }
+
+    /// The lanes of a parallel-replicas FINAL are laid out by the coordinator; not covered yet.
+    if (is_parallel_reading_from_replicas)
+        return false;
+
+    /// The merges compare the whole sorting key, while a virtual row, built from the primary index,
+    /// covers only the primary key columns; the remaining sorting key columns are filled with the
+    /// type's default (see `setVirtualRow`). The virtual row then still sorts before every row it
+    /// announces only if that default is the first value of the column in the merge's order.
+    const auto & sorting_key = storage_snapshot->metadata->getSortingKey();
+    const auto & primary_key = storage_snapshot->metadata->getPrimaryKey();
+    for (size_t i = primary_key.column_names.size(); i < sorting_key.column_names.size(); ++i)
+    {
+        if (!sorting_key.reverse_flags.empty() && sorting_key.reverse_flags[i])
+            return false;
+
+        /// NULLs come last in the merge's order, so a Nullable default is the last value, not the first.
+        WhichDataType which(removeLowCardinality(sorting_key.data_types[i]));
+        if (!(which.isUInt() || which.isString() || which.isFixedString() || which.isDate() || which.isDateTime()
+              || which.isUUID() || which.isIPv4() || which.isIPv6()))
+            return false;
+    }
+
     return true;
 }
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Processors/Merges/Algorithms/IMergingAlgorithm.h>
+#include <Processors/Merges/Algorithms/MergeTreeReadInfo.h>
 
 #include <Core/Block_fwd.h>
 #include <Processors/IProcessor.h>
@@ -42,6 +43,15 @@ public:
 
     Status prepare() override;
 
+    /// Announce the lower bound of the rows still to come as a virtual row before the first
+    /// output chunk and, with `per_block`, after every one (see `IMergingAlgorithm::getVirtualRowForNextOutput`).
+    /// For a merge whose output is merged again downstream: the FINAL merges of a read in order.
+    void enableVirtualRowAnnouncement(bool per_block)
+    {
+        announce_virtual_rows = true;
+        announce_virtual_row_per_block = per_block;
+    }
+
 protected:
     virtual void onNewInput(); /// Is called when new input is added. Only if have_all_inputs = false.
     virtual void onFinish() {} /// Is called when all data is processed.
@@ -65,6 +75,11 @@ protected:
     };
 
     State state;
+
+    bool announce_virtual_rows = false;
+    bool announce_virtual_row_per_block = false;
+    /// An output chunk went out and the bound for the rows after it is still to be announced.
+    bool virtual_row_announcement_pending = false;
 
 private:
     struct InputState
@@ -123,7 +138,14 @@ public:
         Stopwatch watch{CLOCK_MONOTONIC_COARSE};
 
         if (!state.init_chunks.empty())
+        {
             algorithm.initialize(std::move(state.init_chunks));
+
+            /// Announced before the merge produces anything, so that a merge downstream can
+            /// defer this stream, and with it the inputs it has not pulled from yet.
+            if (announce_virtual_rows && announceVirtualRow())
+                return;
+        }
 
         if (state.has_input)
         {
@@ -148,12 +170,24 @@ public:
             state.no_data = false;
         }
 
+        /// Taken only now, after the data the merge asked for along with the chunk has arrived:
+        /// the first rows of that data may precede everything else the merge holds.
+        if (virtual_row_announcement_pending)
+        {
+            virtual_row_announcement_pending = false;
+            if (announceVirtualRow())
+                return;
+        }
+
         IMergingAlgorithm::Status status = algorithm.merge();
 
         if ((status.chunk && status.chunk.hasRows()) || !status.chunk.getChunkInfos().empty())
         {
             // std::cerr << "Got chunk with " << status.chunk.getNumRows() << " rows" << std::endl;
             state.output_chunk = std::move(status.chunk);
+
+            if (announce_virtual_row_per_block && !status.is_finished && state.output_chunk.hasRows())
+                virtual_row_announcement_pending = true;
         }
 
         if (status.required_source >= 0)
@@ -181,6 +215,19 @@ protected:
     bool empty_chunk_on_finish = false;
 
     Algorithm algorithm;
+
+    /// Puts the algorithm's bound into the output as a virtual row. False when there is none to announce.
+    bool announceVirtualRow()
+    {
+        auto info = algorithm.getVirtualRowForNextOutput();
+        if (!info)
+            return false;
+
+        Chunk chunk(outputs.front().getHeader().cloneEmptyColumns(), 0);
+        chunk.getChunkInfos().add(std::move(info));
+        state.output_chunk = std::move(chunk);
+        return true;
+    }
 
     /// Profile info.
     UInt64 merging_elapsed_ns = 0;

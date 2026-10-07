@@ -977,6 +977,9 @@ SummingSortedAlgorithm::SummingSortedAlgorithm(
 
 void SummingSortedAlgorithm::initialize(Inputs inputs)
 {
+    for (auto & input : inputs)
+        prepareVirtualRowInput(input, *columns_definition.origin_header, virtual_row_conversions);
+
     /// Always use origin_header (the un-flattened header) for removeReplicatedFromSortingColumns,
     /// because `header` may be flattened below when allow_tuple_element_aggregation is enabled.
     removeReplicatedFromSortingColumns(columns_definition.origin_header, inputs, description);
@@ -996,6 +999,8 @@ void SummingSortedAlgorithm::initialize(Inputs inputs)
 
 void SummingSortedAlgorithm::consume(Input & input, size_t source_num)
 {
+    prepareVirtualRowInput(input, *columns_definition.origin_header, virtual_row_conversions);
+
     /// Always use origin_header (the un-flattened header) for column position lookup,
     /// since `header` may have been flattened in initialize() and column positions would differ.
     removeReplicatedFromSortingColumns(columns_definition.origin_header, input, description);
@@ -1016,7 +1021,11 @@ IMergingAlgorithm::Status SummingSortedAlgorithm::merge()
         if (current->isLast() && skipLastRowFor(current->order))
         {
             /// If we skip this row, it's not equals with any key we process.
-            last_key.reset();
+            /// A virtual row only announces the key of the source's next rows, which may continue
+            /// the group: it stays open, and `last_key` stays valid because `updateCursor` keeps
+            /// its chunk alive while the source delivers the announced data.
+            if (!isVirtualRowInput(current->order))
+                last_key.reset();
             /// Get the next block from the corresponding source, if there is one.
             queue.removeTop();
             return Status(current.impl->order);
@@ -1068,6 +1077,23 @@ IMergingAlgorithm::Status SummingSortedAlgorithm::merge()
 
     last_chunk_sort_columns.clear();
     return Status(merged_data.pull(), true);
+}
+
+std::shared_ptr<MergeTreeReadInfo> SummingSortedAlgorithm::getVirtualRowForNextOutput()
+{
+    /// Groups finished but not pulled yet precede the queue.
+    if (merged_data.mergedRows() != 0)
+        return nullptr;
+
+    /// The group being accumulated is keyed by `last_key` and comes out before anything the queue holds.
+    if (merged_data.isGroupStarted())
+    {
+        if (last_key.empty())
+            return nullptr;
+        return makeVirtualRowBound(last_key.sort_columns, last_key.row_num);
+    }
+
+    return makeVirtualRowBoundFromQueue();
 }
 
 SummingSortedAlgorithm::ColumnsDefinition::ColumnsDefinition() = default;

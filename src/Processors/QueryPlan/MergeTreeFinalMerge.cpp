@@ -32,6 +32,7 @@ namespace Setting
 {
     extern const SettingsBool compile_sort_description;
     extern const SettingsUInt64 min_count_to_compile_sort_description;
+    extern const SettingsBool read_in_order_use_virtual_row_per_block;
 }
 
 namespace ErrorCodes
@@ -46,7 +47,8 @@ void addMergingFinal(
     const StorageMetadataPtr & metadata_snapshot,
     size_t max_block_size_rows,
     bool enable_vertical_final,
-    bool read_in_reverse)
+    bool read_in_reverse,
+    bool virtual_row_per_block)
 {
     auto header = pipe.getSharedHeader();
     size_t num_outputs = pipe.numOutputPorts();
@@ -103,7 +105,9 @@ void addMergingFinal(
         }
     };
 
-    pipe.addTransform(get_merging_processor());
+    auto merging_processor = get_merging_processor();
+    merging_processor->enableVirtualRowAnnouncement(virtual_row_per_block);
+    pipe.addTransform(std::move(merging_processor));
     if (enable_vertical_final)
         pipe.addSimpleTransform([](const SharedHeader & header_)
                                 { return std::make_shared<SelectByIndicesTransform>(header_); });
@@ -181,7 +185,9 @@ Pipe buildFullFinalMergePipe(
                             { return std::make_shared<ExpressionTransform>(header, sorting_expr); });
     if (!out_projection)
         out_projection = createProjection(pipe.getHeader());
-    addMergingFinal(pipe, sort_description, merging_params, metadata_snapshot, max_block_size_rows, enable_vertical_final);
+    addMergingFinal(
+        pipe, sort_description, merging_params, metadata_snapshot, max_block_size_rows, enable_vertical_final,
+        /*read_in_reverse=*/ false, context->getSettingsRef()[Setting::read_in_order_use_virtual_row_per_block]);
     return pipe;
 }
 
@@ -235,7 +241,9 @@ Pipe buildDistributedFinalPipe(
         addLayerRangeFilterToPipe(pipe, primary_key, lane.borders, lane.index, *in_reverse_order, context);
         if (!out_projection)
             out_projection = createProjection(pipe.getHeader());
-        addMergingFinal(pipe, sort_description, merging_params, metadata_snapshot, max_block_size_rows, enable_vertical_final);
+        addMergingFinal(
+            pipe, sort_description, merging_params, metadata_snapshot, max_block_size_rows, enable_vertical_final,
+            /*read_in_reverse=*/ false, settings[Setting::read_in_order_use_virtual_row_per_block]);
         final_merge_pipes.emplace_back(std::move(pipe));
     }
 

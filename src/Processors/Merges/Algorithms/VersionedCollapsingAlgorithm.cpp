@@ -64,6 +64,22 @@ void VersionedCollapsingAlgorithm::insertRow(size_t skip_rows, const RowRef & ro
     }
 }
 
+std::shared_ptr<MergeTreeReadInfo> VersionedCollapsingAlgorithm::getVirtualRowForNextOutput()
+{
+    /// Rows merged but not pulled yet precede the queue.
+    if (merged_data->mergedRows() != 0)
+        return nullptr;
+
+    /// The rows waiting for a cancelling pair share the key being accumulated and come out before the queue.
+    if (!current_keys.empty())
+    {
+        const auto & row = current_keys.front();
+        return makeVirtualRowBound(*row.sort_columns, row.row_num);
+    }
+
+    return makeVirtualRowBoundFromQueue();
+}
+
 IMergingAlgorithm::Status VersionedCollapsingAlgorithm::merge()
 {
     /// Take rows in correct order and put them into `merged_columns` until the rows no more than `max_block_size`

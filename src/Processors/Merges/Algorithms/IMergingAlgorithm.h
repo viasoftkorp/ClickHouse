@@ -12,6 +12,8 @@ namespace DB
 
 using IColumnPermutation = PaddedPODArray<size_t>;
 
+class MergeTreeReadInfo;
+
 class IMergingAlgorithm
 {
 public:
@@ -40,18 +42,25 @@ public:
         /// between different algorithm objects in parallel FINAL.
         bool skip_last_row = false;
 
+        /// The chunk was a virtual row turned into a one-row cursor (see `prepareVirtualRowInput`):
+        /// it only announces the key of the source's next rows, so besides being skipped it must
+        /// not close the group of rows the algorithm is accumulating.
+        bool is_virtual_row = false;
+
         IColumnPermutation * permutation = nullptr;
 
         void swap(Input & other) noexcept
         {
             chunk.swap(other.chunk);
             std::swap(skip_last_row, other.skip_last_row);
+            std::swap(is_virtual_row, other.is_virtual_row);
         }
 
         void set(Chunk chunk_)
         {
             chunk = std::move(chunk_);
             skip_last_row = false;
+            is_virtual_row = false;
         }
     };
 
@@ -112,6 +121,13 @@ public:
     virtual void initialize(Inputs inputs) = 0;
     virtual void consume(Input & input, size_t source_num) = 0;
     virtual Status merge() = 0;
+
+    /// A virtual row announcing the lower bound, in the merge's sort order, of every row the
+    /// algorithm may still emit: the sort key of the group it is accumulating, or of the front
+    /// of its queue. The merging transform passes it downstream before the next output chunk
+    /// (see `IMergingTransform::work`). Null when the inputs carried no virtual rows, so there
+    /// are no conversions to attach, or when the bound is not known.
+    virtual std::shared_ptr<MergeTreeReadInfo> getVirtualRowForNextOutput() { return nullptr; }
 
     /// Called when a source the merge requested turns out to be finished without delivering
     /// any data (e.g. all its rows were filtered out upstream), so `consume` is never called
