@@ -2634,22 +2634,10 @@ Pipe ReadFromMergeTree::spreadMarkRangesAmongStreamsFinal(
                 /// reach `createProjection` or `addMergingFinal` below. Dropping it is safe here:
                 /// unlike the join-by-shards path, the per-layer pipes are simply united, so their
                 /// positions carry no meaning.
-                for (size_t layer = 0; layer < split_ranges_result.merging_pipes.size(); ++layer)
+                for (auto && merging_pipe : split_ranges_result.merging_pipes)
                 {
-                    auto & merging_pipe = split_ranges_result.merging_pipes[layer];
-                    if (merging_pipe.empty())
-                        continue;
-
-                    if (virtual_row_conversion && !split_ranges_result.layer_borders.empty())
-                        clampVirtualRowsToLayerBorder(
-                            merging_pipe,
-                            storage_snapshot->metadata->getPrimaryKey(),
-                            split_ranges_result.layer_borders,
-                            layer,
-                            split_ranges_result.in_reverse_order,
-                            read_in_reverse);
-
-                    pipes.push_back(std::move(merging_pipe));
+                    if (!merging_pipe.empty())
+                        pipes.push_back(std::move(merging_pipe));
                 }
             }
             else

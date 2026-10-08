@@ -38,12 +38,6 @@ struct SplitPartsWithRangesByPrimaryKeyResult
 {
     RangesInDataParts non_intersecting_parts_ranges;
     Pipes merging_pipes;
-
-    /// Set when `merging_pipes` are PK-range layers: pipe `i` carries the rows of the interval
-    /// (layer_borders[i-1], layer_borders[i]], or [layer_borders[i], layer_borders[i-1]) when
-    /// `in_reverse_order`, with the open ends for the first and the last pipe.
-    std::vector<std::vector<Field>> layer_borders;
-    bool in_reverse_order = false;
 };
 
 /** Splits parts ranges into:
@@ -98,19 +92,6 @@ Pipes readByLayers(
     const KeyDescription & primary_key,
     ReadingInOrderStepGetter && step_getter,
     ContextPtr context);
-
-/// Tightens the virtual rows of the streams of PK-range layer `layer_index` to the border the layer
-/// starts from in reading order. A part shared with the neighbouring layer announces the first key
-/// of its range, which lies before this layer's interval, so a merge downstream would otherwise wake
-/// the layer as soon as it reaches that key. `read_in_reverse` means the streams are read against
-/// the storage order. A virtual row covering fewer columns than the border is left as it is.
-void clampVirtualRowsToLayerBorder(
-    Pipe & pipe,
-    const KeyDescription & primary_key,
-    const std::vector<std::vector<Field>> & borders,
-    size_t layer_index,
-    bool in_reverse_order,
-    bool read_in_reverse);
 
 /// Trims `pipe` to PK-range layer `layer_index` (the interval (borders[layer_index-1], borders[layer_index]])
 /// via a FilterSortedStreamByRange; no-op for the open first/last interval. Used by the distributed

@@ -116,6 +116,44 @@ INSERT INTO t_coal SELECT 50 + number, 2, NULL FROM numbers(100);
 SELECT l.k, l.a, l.b FROM t_coal AS l FINAL INNER JOIN r ON l.k = r.k WHERE l.k >= 45 ORDER BY l.k LIMIT 6;
 SELECT l.k, l.a, l.b FROM t_coal AS l FINAL INNER JOIN r ON l.k = r.k WHERE l.k >= 45 ORDER BY l.k LIMIT 6 SETTINGS read_in_order_use_virtual_row_per_block = 1;
 
+-- Parts of several granules are split into PK-range layers, each merged by its own FINAL merge
+-- and trimmed to its range. A layer announces the key of its next output, so the merge after the
+-- join defers the layers the limit does not reach.
+SELECT '--- layers';
+DROP TABLE IF EXISTS t_layers;
+DROP TABLE IF EXISTS r_wide;
+CREATE TABLE t_layers (k UInt64, ver UInt8, v String) ENGINE = ReplacingMergeTree(ver) ORDER BY k SETTINGS index_granularity = 8;
+INSERT INTO t_layers SELECT number, 1, 'p1' FROM numbers(1000);
+INSERT INTO t_layers SELECT 500 + number, 2, 'p2' FROM numbers(1000);
+INSERT INTO t_layers SELECT 1000 + number, 3, 'p3' FROM numbers(1000);
+INSERT INTO t_layers SELECT number * 10, 4, 'p4' FROM numbers(200);
+CREATE TABLE r_wide (k UInt64) ENGINE = MergeTree ORDER BY k;
+INSERT INTO r_wide SELECT number * 3 FROM numbers(700);
+SELECT extract(explain, '(?:Prefix sort description|Read type|Virtual row conversions).*') AS e
+FROM (EXPLAIN PLAN actions = 1, indexes = 0
+    SELECT l.k, l.v FROM t_layers AS l FINAL INNER JOIN r_wide ON l.k = r_wide.k ORDER BY l.k LIMIT 7) WHERE e != '';
+SELECT '-- several layers, with virtual rows';
+SELECT countIf(explain LIKE '%filter values in%') > 1, countIf(explain LIKE '%VirtualRowTransform%') > 0
+FROM (EXPLAIN PIPELINE SELECT l.k, l.v FROM t_layers AS l FINAL INNER JOIN r_wide ON l.k = r_wide.k ORDER BY l.k LIMIT 7);
+SELECT l.k, l.v FROM t_layers AS l FINAL INNER JOIN r_wide ON l.k = r_wide.k ORDER BY l.k LIMIT 7 SETTINGS log_comment = '05325_layers_limit_in_first_layer';
+SELECT l.k, l.v FROM t_layers AS l FINAL INNER JOIN r_wide ON l.k = r_wide.k ORDER BY l.k DESC LIMIT 5;
+-- limits crossing a layer border (740 and 1252 for these parts with max_final_threads = 3)
+SELECT l.k, l.v FROM t_layers AS l FINAL INNER JOIN r_wide ON l.k = r_wide.k WHERE l.k >= 735 ORDER BY l.k LIMIT 6;
+SELECT l.k, l.v FROM t_layers AS l FINAL LEFT JOIN r_wide ON l.k = r_wide.k WHERE l.k >= 1248 ORDER BY l.k LIMIT 8;
+SELECT k, v FROM t_layers FINAL ORDER BY k LIMIT 5 OFFSET 738;
+SELECT k, v FROM t_layers FINAL ORDER BY k DESC LIMIT 5 OFFSET 745;
+SELECT '-- per block';
+SELECT l.k, l.v FROM t_layers AS l FINAL INNER JOIN r_wide ON l.k = r_wide.k ORDER BY l.k LIMIT 7 SETTINGS read_in_order_use_virtual_row_per_block = 1;
+SELECT l.k, l.v FROM t_layers AS l FINAL INNER JOIN r_wide ON l.k = r_wide.k ORDER BY l.k DESC LIMIT 5 SETTINGS read_in_order_use_virtual_row_per_block = 1;
+SELECT l.k, l.v FROM t_layers AS l FINAL INNER JOIN r_wide ON l.k = r_wide.k WHERE l.k >= 735 ORDER BY l.k LIMIT 6 SETTINGS read_in_order_use_virtual_row_per_block = 1;
+SELECT k, v FROM t_layers FINAL ORDER BY k LIMIT 5 OFFSET 738 SETTINGS read_in_order_use_virtual_row_per_block = 1;
+SELECT '-- single thread';
+SELECT l.k, l.v FROM t_layers AS l FINAL INNER JOIN r_wide ON l.k = r_wide.k WHERE l.k >= 735 ORDER BY l.k LIMIT 6 SETTINGS max_threads = 1, read_in_order_use_virtual_row_per_block = 1;
+SELECT '-- the limit is reached within the first layer: far fewer rows read than the table has';
+SYSTEM FLUSH LOGS query_log;
+SELECT read_rows < 3200 FROM system.query_log
+WHERE current_database = currentDatabase() AND log_comment = '05325_layers_limit_in_first_layer' AND type = 'QueryFinish';
+
 -- The virtual row covers only the primary key; the other sorting key columns get the type default,
 -- which positions the virtual row correctly only when it is the smallest value of the type.
 SELECT '--- a sorting key longer than the primary key, unsigned suffix: virtual row';
@@ -152,6 +190,8 @@ DROP TABLE t_vcol;
 DROP TABLE t_sum;
 DROP TABLE t_agg;
 DROP TABLE t_coal;
+DROP TABLE t_layers;
+DROP TABLE r_wide;
 DROP TABLE t_long_key;
 DROP TABLE t_graphite;
 DROP TABLE r;
