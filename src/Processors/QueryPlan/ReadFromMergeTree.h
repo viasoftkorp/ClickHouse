@@ -404,11 +404,13 @@ public:
     /// Whether `requestReadingInOrder` accepts a reverse direction. With `FINAL`, only the engines whose merge
     /// does not depend on the direct order of rows can read in reverse order.
     bool canReadInReverseOrder() const;
-    bool setVirtualRowConversions(ActionsDAG virtual_row_conversion_);
+    /// `direction` is the one the subsequent `requestReadingInOrder` gets: with FINAL, it decides
+    /// whether the virtual rows bound the rows of their part (see `canUseVirtualRowWithFinal`).
+    bool setVirtualRowConversions(ActionsDAG virtual_row_conversion_, int direction);
     void resetVirtualRowConversions() { virtual_row_conversion = nullptr; }
 
-    /// Whether the FINAL merges of this read can carry virtual rows (see `IMergingTransform::enableVirtualRowAnnouncement`).
-    bool canUseVirtualRowWithFinal() const;
+    /// Whether the FINAL merges of a read in `direction` can carry virtual rows (see `IMergingTransform::enableVirtualRowAnnouncement`).
+    bool canUseVirtualRowWithFinal(int direction) const;
     bool readsInOrder() const;
     const InputOrderInfoPtr & getInputOrder() const { return query_info.input_order_info; }
     const SortDescription & getSortDescription() const override { return result_sort_description; }

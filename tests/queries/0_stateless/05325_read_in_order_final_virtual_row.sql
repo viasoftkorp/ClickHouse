@@ -174,6 +174,31 @@ SELECT extract(explain, '(?:Prefix sort description|Read type|Virtual row conver
 FROM (EXPLAIN PLAN actions = 1, indexes = 0
     SELECT l.k, l.v FROM t_long_key AS l FINAL LEFT JOIN r ON l.k = r.k ORDER BY l.k LIMIT 3) WHERE e != '';
 
+-- A reverse read flips the order of every sorting key column, so the default is the first value of
+-- a suffix column only when the column's declared direction is flipped as well.
+SELECT '--- a sorting key longer than the primary key, reverse read: no virtual row';
+DROP TABLE IF EXISTS t_long_key;
+CREATE TABLE t_long_key (k UInt64, v UInt32) ENGINE = ReplacingMergeTree ORDER BY (k, v) PRIMARY KEY k;
+INSERT INTO t_long_key VALUES (9, 7), (9, 3), (8, 1), (7, 1);
+INSERT INTO t_long_key VALUES (9, 7), (9, 5), (8, 2), (7, 2);
+SELECT extract(explain, '(?:Prefix sort description|Read type|Virtual row conversions).*') AS e
+FROM (EXPLAIN PLAN actions = 1, indexes = 0
+    SELECT k, v FROM t_long_key FINAL ORDER BY k DESC LIMIT 10) WHERE e != '';
+SELECT * FROM (SELECT k, v FROM t_long_key FINAL ORDER BY k DESC LIMIT 10 SETTINGS max_threads = 1, max_final_threads = 1) ORDER BY k DESC, v DESC;
+
+SELECT '--- a sorting key longer than the primary key, descending suffix, reverse read: virtual row';
+DROP TABLE IF EXISTS t_long_key;
+CREATE TABLE t_long_key (k UInt64, v UInt32) ENGINE = ReplacingMergeTree ORDER BY (k, v DESC) PRIMARY KEY k;
+INSERT INTO t_long_key VALUES (9, 7), (9, 3), (8, 1), (7, 1);
+INSERT INTO t_long_key VALUES (9, 7), (9, 5), (8, 2), (7, 2);
+SELECT extract(explain, '(?:Prefix sort description|Read type|Virtual row conversions).*') AS e
+FROM (EXPLAIN PLAN actions = 1, indexes = 0
+    SELECT k, v FROM t_long_key FINAL ORDER BY k LIMIT 10) WHERE e != '';
+SELECT extract(explain, '(?:Prefix sort description|Read type|Virtual row conversions).*') AS e
+FROM (EXPLAIN PLAN actions = 1, indexes = 0
+    SELECT k, v FROM t_long_key FINAL ORDER BY k DESC LIMIT 10) WHERE e != '';
+SELECT * FROM (SELECT k, v FROM t_long_key FINAL ORDER BY k DESC LIMIT 10 SETTINGS max_threads = 1, max_final_threads = 1) ORDER BY k DESC, v;
+
 SELECT '--- GraphiteMergeTree: no virtual row';
 DROP TABLE IF EXISTS t_graphite;
 CREATE TABLE t_graphite (Path String, Time DateTime, Value Float64, Version UInt32, k UInt64 ALIAS Version)

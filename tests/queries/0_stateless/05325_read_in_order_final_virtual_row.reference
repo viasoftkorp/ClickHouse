@@ -261,6 +261,29 @@ Read type: Default
 Prefix sort description: k ASC
 Read type: InOrder
 Read type: Default
+--- a sorting key longer than the primary key, reverse read: no virtual row
+Prefix sort description: k DESC
+Read type: InReverseOrder
+9	7
+9	5
+9	3
+8	2
+8	1
+7	2
+7	1
+--- a sorting key longer than the primary key, descending suffix, reverse read: virtual row
+Prefix sort description: k ASC
+Read type: InOrder
+Prefix sort description: k DESC
+Read type: InReverseOrder
+Virtual row conversions
+9	3
+9	5
+9	7
+8	1
+8	2
+7	1
+7	2
 --- GraphiteMergeTree: no virtual row
 Prefix sort description: Path ASC, Time ASC
 Read type: InOrder

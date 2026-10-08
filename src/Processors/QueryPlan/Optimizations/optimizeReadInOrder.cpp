@@ -1252,7 +1252,8 @@ InputOrderInfoPtr buildInputOrderInfo(
             bool uses_virtual_row = false;
             if (order_info.virtual_row_conversion)
             {
-                uses_virtual_row = reading->setVirtualRowConversions(std::move(*order_info.virtual_row_conversion));
+                uses_virtual_row = reading->setVirtualRowConversions(
+                    std::move(*order_info.virtual_row_conversion), order_info.input_order->direction);
                 virtual_row_reader = reading;
             }
 

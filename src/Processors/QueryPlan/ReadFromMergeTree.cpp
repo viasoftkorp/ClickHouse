@@ -4077,19 +4077,19 @@ bool ReadFromMergeTree::requestReadingInOrder(size_t prefix_size, int direction,
     return true;
 }
 
-bool ReadFromMergeTree::setVirtualRowConversions(ActionsDAG virtual_row_conversion_)
+bool ReadFromMergeTree::setVirtualRowConversions(ActionsDAG virtual_row_conversion_, int direction)
 {
     if (!context->getSettingsRef()[Setting::read_in_order_use_virtual_row])
         return false;
 
-    if (isQueryWithFinal() && !canUseVirtualRowWithFinal())
+    if (isQueryWithFinal() && !canUseVirtualRowWithFinal(direction))
         return false;
 
     virtual_row_conversion = std::make_shared<ExpressionActions>(std::move(virtual_row_conversion_));
     return true;
 }
 
-bool ReadFromMergeTree::canUseVirtualRowWithFinal() const
+bool ReadFromMergeTree::canUseVirtualRowWithFinal(int direction) const
 {
     /// The FINAL merges consume the virtual rows of their part streams and announce the key of
     /// their own next output to the merge downstream. That key bounds the output only for the
@@ -4115,12 +4115,15 @@ bool ReadFromMergeTree::canUseVirtualRowWithFinal() const
     /// The merges compare the whole sorting key, while a virtual row, built from the primary index,
     /// covers only the primary key columns; the remaining sorting key columns are filled with the
     /// type's default (see `setVirtualRow`). The virtual row then still sorts before every row it
-    /// announces only if that default is the first value of the column in the merge's order.
+    /// announces only if that default is the first value of the column in the merge's order, which
+    /// is the column's order in the key flipped by a reverse read.
     const auto & sorting_key = storage_snapshot->metadata->getSortingKey();
     const auto & primary_key = storage_snapshot->metadata->getPrimaryKey();
+    const bool read_in_reverse = direction < 0;
     for (size_t i = primary_key.column_names.size(); i < sorting_key.column_names.size(); ++i)
     {
-        if (!sorting_key.reverse_flags.empty() && sorting_key.reverse_flags[i])
+        const bool column_in_reverse = !sorting_key.reverse_flags.empty() && sorting_key.reverse_flags[i];
+        if (column_in_reverse != read_in_reverse)
             return false;
 
         /// NULLs come last in the merge's order, so a Nullable default is the last value, not the first.
